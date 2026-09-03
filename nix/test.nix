@@ -31,8 +31,50 @@ let
     step crypto jwk create $out/jwk.pub.json $out/jwk.json --kty OKP --crv Ed25519 --no-password --insecure --kid k1
     echo '{"keys":['"$(cat $out/jwk.pub.json)"']}' > $out/www/.well-known/jwks.json
     cat > $out/www/.well-known/openid-configuration <<EOF
-    {"issuer":"https://relay:8443","jwks_uri":"https://relay:8443/.well-known/jwks.json"}
+    {"issuer":"https://relay:8443","jwks_uri":"https://relay:8443/.well-known/jwks.json",
+     "token_endpoint":"https://relay:8443/token","device_authorization_endpoint":"https://relay:8443/device"}
     EOF
+  '';
+
+  # Device flow endpoints: the first token poll is pending, the second
+  # returns an id_token signed with the issuer key.
+  deviceMock = pkgs.writers.writePython3 "device-mock" { flakeIgnore = [ "E501" ]; } ''
+    import json
+    import subprocess
+    import time
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    polls = {}
+
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            form = dict(kv.split("=", 1) for kv in self.rfile.read(n).decode().split("&") if kv)
+            if self.path == "/device":
+                body = {"device_code": "dev123", "user_code": "ABCD-EFGH", "verification_uri": "https://relay:8443/activate", "interval": 1}
+            elif polls.setdefault(form.get("device_code"), 0) == 0:
+                polls[form["device_code"]] = 1
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"authorization_pending"}')
+                return
+            else:
+                claims = json.dumps({"groups": ["wheel"], "email": "dev@example.org"})
+                tok = subprocess.run(
+                    ["${pkgs.step-cli}/bin/step", "crypto", "jwt", "sign", "--key", "${issuer}/jwk.json",
+                     "--iss", "https://relay:8443", "--aud", form["client_id"], "--sub", "someone",
+                     "--exp", str(int(time.time()) + 300), "--jti", str(time.time())],
+                    input=claims, capture_output=True, text=True, check=True).stdout.strip()
+                body = {"id_token": tok, "access_token": "opaque", "token_type": "Bearer"}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body).encode())
+
+
+    HTTPServer(("127.0.0.1", 8089), H).serve_forever()
   '';
 
   artifact =
@@ -64,6 +106,7 @@ let
   # Activation blocks on ExecStartPre, giving the test a window to cut
   # the agent's relay connection while the update is running.
   appSlow = artifact "app" "slow" { startPre = "${pkgs.coreutils}/bin/sleep 6"; };
+  appSlow2 = artifact "app" "slow2" { startPre = "${pkgs.coreutils}/bin/sleep 6"; };
   otherV1 = artifact "other" "v1" { };
 
   pushWrapper = pkgs.writeShellScriptBin "push" ''
@@ -78,10 +121,22 @@ in
     { config, ... }:
     {
       imports = [ self.nixosModules.relay ];
+      environment.systemPackages = [ pkgs.iproute2 ];
       networking.firewall.allowedTCPPorts = [
         7443
         8443
+        53
       ];
+      networking.firewall.allowedUDPPorts = [ 53 ];
+      # SRV discovery. dnsmasq also answers A/AAAA from /etc/hosts.
+      services.dnsmasq = {
+        enable = true;
+        resolveLocalQueries = false;
+        settings = {
+          srv-host = "_flakelet-relay._tcp.test,relay,7443";
+          no-resolv = true;
+        };
+      };
       services.flakelet-relay = {
         enable = true;
         tls = {
@@ -149,13 +204,20 @@ in
           sslCertificate = "${certs}/relay/cert.pem";
           sslCertificateKey = "${certs}/relay/key.pem";
           root = "${issuer}/www";
+          locations."/device".proxyPass = "http://127.0.0.1:8089";
+          locations."/token".proxyPass = "http://127.0.0.1:8089";
         };
+      };
+      systemd.services.device-mock = {
+        wantedBy = [ "multi-user.target" ];
+        serviceConfig.ExecStart = deviceMock;
       };
     };
 
   containers.agent =
-    { ... }:
+    { containers, ... }:
     {
+      networking.nameservers = [ containers.relay.networking.primaryIPAddress ];
       imports = [
         flakelet.nixosModules.default
         self.nixosModules.agent
@@ -174,10 +236,11 @@ in
         appV2
         appBroken
         appSlow
+        appSlow2
       ];
       services.flakelet-agent = {
         enable = true;
-        relays = [ "https://relay:7443" ];
+        relaySrv = "test";
         caFile = "${certs}/ca.pem";
         certFile = "${certs}/agent/cert.pem";
         keyFile = "${certs}/agent/key.pem";
@@ -189,8 +252,9 @@ in
     };
 
   containers.client =
-    { ... }:
+    { containers, ... }:
     {
+      networking.nameservers = [ containers.relay.networking.primaryIPAddress ];
       environment.systemPackages = [
         pushWrapper
         pkgs.step-cli
@@ -224,9 +288,9 @@ in
     relay.wait_until_succeeds("curl -sf http://127.0.0.1:7400/metrics | grep -q 'agent_up{host=\"agent\"} 1'")
     agent.succeed("systemctl is-active app.service other.service")
 
-    with subtest("deploy with client certificate"):
+    with subtest("deploy with client certificate, relay found via SRV"):
         set_app("${appV2}")
-        out = client.succeed(f"{admin} deploy agent/app 2>&1")
+        out = client.succeed("push --relay-srv test --cert ${certs}/admin.pem --key ${certs}/admin-key.pem deploy agent/app 2>&1")
         print(out)
         assert "app: updated to generation 2" in out, out
         assert "agent/app: updated (generation 2)" in out, out
@@ -241,14 +305,9 @@ in
         )
         assert "agent/app: updated (generation 3)" in out, out
 
-    with subtest("policy denies uncovered target and jti replay"):
+    with subtest("policy denies uncovered target"):
         out = client.fail(
             f"FLAKELET_RELAY_TOKEN_COMMAND='echo {tok}' push --relay https://relay:7443 deploy agent/other 2>&1"
-        )
-        assert "unauthorized" in out and "jti" in out, out
-        tok2 = token("repo:github:example/app:ref:refs/heads/main")
-        out = client.fail(
-            f"FLAKELET_RELAY_TOKEN_COMMAND='echo {tok2}' push --relay https://relay:7443 deploy agent/other 2>&1"
         )
         assert "target_denied" in out and "agent/other" in out, out
 
@@ -258,6 +317,14 @@ in
             f"FLAKELET_RELAY_TOKEN_COMMAND='echo {tok}' push --relay https://relay:7443 deploy agent/other 2>&1"
         )
         assert "agent/other: unchanged (generation 1)" in out, out
+
+    with subtest("push login via device flow, cached token used afterwards"):
+        out = client.succeed("push login --issuer https://relay:8443 --client-id flakelet-relay 2>&1")
+        assert "confirm code ABCD-EFGH" in out and "Logged in as dev@example.org" in out, out
+        client.succeed("test \"$(stat -c %a /root/.local/state/flakelet-push/token.json)\" = 600")
+        for _ in range(2):
+            out = client.succeed("push --relay https://relay:7443 deploy agent/other 2>&1")
+            assert "agent/other: unchanged" in out, out
 
     with subtest("waves: failing first wave skips the second"):
         set_app("${appBroken}")
@@ -298,21 +365,46 @@ in
 
     with subtest("agent link drop mid-run replays missed lines once"):
         set_app("${appSlow}")
+        since = agent.succeed("date +%s").strip()
         client.succeed(f"{admin} deploy agent/app > /tmp/slow.out 2>&1 &")
-        agent.wait_until_succeeds("journalctl -u flakelet-relay-job-app.service --since -20s | grep -q 'app-slow'")
-        # Reset the established connection, then make the relay unreachable
-        # so the reconnect only succeeds after the update finished.
-        agent.succeed("ss -K dport = 7443")
+        agent.wait_until_succeeds(f"journalctl -u flakelet-relay-job-app.service --since=@{since} | grep -q 'app-slow'")
+        # Make the relay unreachable for new connections, then reset the
+        # established one on both ends.
         agent.succeed("for a in $(getent ahosts relay | cut -d' ' -f1 | sort -u); do ip route add unreachable $a; done")
-        agent.wait_until_succeeds("journalctl -u flakelet-relay-job-app.service --since -30s | grep -q 'updated to generation'")
+        relay.succeed("for a in $(getent ahosts agent | cut -d' ' -f1 | sort -u); do ss -K dst \"[$a]\"; done")
+        agent.succeed("ss -K dport = 7443")
+        agent.wait_until_succeeds(f"journalctl -u flakelet-relay-job-app.service --since=@{since} | grep -q 'updated to generation'")
         agent.succeed("for a in $(getent ahosts relay | cut -d' ' -f1 | sort -u); do ip route del unreachable $a; done")
         client.wait_until_succeeds("grep -q 'agent/app: updated' /tmp/slow.out", timeout=90)
         out = client.succeed("cat /tmp/slow.out")
         print(out)
         assert out.count("updated to generation") == 1, out
 
-    with subtest("agent reconnects after relay restart"):
+    with subtest("agent restart mid-run reattaches to the unit"):
+        set_app("${appSlow2}")
+        client.succeed(f"{admin} deploy agent/app > /tmp/restart.out 2>&1 &")
+        agent.wait_until_succeeds("journalctl -u flakelet-relay-job-app.service --since -20s | grep -q 'app-slow2'")
+        agent.succeed("systemctl restart flakelet-agent")
+        agent.succeed("test -n \"$(ls /var/lib/flakelet-agent/jobs)\"")
+        client.wait_until_succeeds("grep -q 'agent/app: updated' /tmp/restart.out", timeout=90)
+        out = client.succeed("cat /tmp/restart.out")
+        print(out)
+        assert out.count("app: updated to generation") == 1, out
+        agent.succeed("systemctl is-active app.service")
+
+    with subtest("relay restart mid-run, push resumes via /v1/jobs"):
+        set_app("${appSlow}")
+        since = agent.succeed("date +%s").strip()
+        client.succeed(f"{admin} deploy agent/app > /tmp/resume.out 2>&1 &")
+        agent.wait_until_succeeds(f"journalctl -u flakelet-relay-job-app.service --since=@{since} | grep -q 'app-slow'")
         relay.succeed("systemctl restart flakelet-relay")
-        relay.wait_until_succeeds("curl -sf http://127.0.0.1:7400/metrics | grep -q 'agent_up{host=\"agent\"} 1'", timeout=90)
+        try:
+            client.wait_until_succeeds("grep -q '» ok' /tmp/resume.out", timeout=90)
+        finally:
+            out = client.succeed("cat /tmp/resume.out")
+            print(out)
+        assert "resuming job" in out, out
+        assert out.count("app: updated to generation") == 1, out
+        assert "agent/app: updated" in out, out
   '';
 }

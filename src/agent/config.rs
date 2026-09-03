@@ -6,7 +6,12 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     /// Relay base URLs (`https://host:port`), all connected at once.
+    #[serde(default)]
     pub relays: Vec<String>,
+    /// Domain with `_flakelet-relay._tcp` SRV records, re-resolved on TTL
+    /// expiry but at most once a minute.
+    #[serde(default)]
+    pub relay_srv: Option<String>,
     /// Pin for the relay server certificate; WebPKI roots if unset.
     #[serde(default)]
     pub ca_file: Option<PathBuf>,
@@ -32,7 +37,7 @@ impl Config {
         let data = std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
         let cfg: Config =
             serde_json::from_slice(&data).map_err(|e| format!("{}: {e}", path.display()))?;
-        if cfg.relays.is_empty() {
+        if cfg.relays.is_empty() && cfg.relay_srv.is_none() {
             return Err("no relays configured".into());
         }
         if cfg.cert.is_some() != cfg.key.is_some() {

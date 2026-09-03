@@ -178,12 +178,17 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     Frame::Ack { id, .. }
                     | Frame::Log { id, .. }
                     | Frame::Progress { id }
-                    | Frame::Done { id, .. } => {
+                    | Frame::Done { id, .. }
+                    | Frame::Error { id: Some(id), .. } => {
                         let id = id.clone();
                         relay.dispatch(host, &id, frame);
                     }
-                    Frame::Error { id, code, message } => {
-                        tracing::warn!(host, ?id, code, "agent error: {message}");
+                    Frame::Error {
+                        id: None,
+                        code,
+                        message,
+                    } => {
+                        tracing::warn!(host, code, "agent error: {message}");
                     }
                     _ => {}
                 }

@@ -1,7 +1,6 @@
 //! Client-facing endpoints: deploy, agents, metrics.
 
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -24,6 +23,9 @@ pub async fn handle(relay: Arc<Relay>, peer: Vec<String>, req: Request<Incoming>
         (&Method::GET, "/v1/agent") => agent_conn::upgrade(relay, peer, req).await,
         (&Method::POST, "/v1/deploy") => deploy(relay, peer, req).await,
         (&Method::GET, "/v1/agents") => agents(&relay, peer, &req).await,
+        (&Method::GET, p) if p.starts_with("/v1/jobs/") => {
+            jobs(relay.clone(), peer, &req, &p["/v1/jobs/".len()..]).await
+        }
         (&Method::GET, "/metrics") => Ok(http::text(StatusCode::OK, relay.metrics())),
         (&Method::GET, "/health") => Ok(http::text(StatusCode::OK, String::from("ok\n"))),
         _ => Err(http::error(
@@ -78,6 +80,7 @@ async fn agents(relay: &Relay, peer: Vec<String>, req: &Request<Incoming>) -> Re
     Ok(http::json(StatusCode::OK, &AgentsResponse { agents }))
 }
 
+#[derive(Clone)]
 struct Planned {
     target: String,
     host: String,
@@ -215,50 +218,47 @@ async fn deploy(
     let caller = principals.join("\n");
     let job = job_id(&caller, &dr.id);
     tracing::info!(job, caller, targets = ?waves.iter().flatten().map(|p| &p.target).collect::<Vec<_>>(), "deploy accepted");
+    let (tx, body) = Body::channel(64);
+    tokio::spawn(run_job(relay, job, waves, tx));
+    Ok(sse_response(body))
+}
+
+fn sse_response(body: Body) -> Resp {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(hyper::header::CONTENT_TYPE, "text/event-stream")
+        .header(hyper::header::CACHE_CONTROL, "no-cache")
+        .header("X-Accel-Buffering", "no")
+        .body(body)
+        .expect("static headers")
+}
+
+fn accepted_event(relay: &Relay, job: &str, targets: &[Planned]) -> Event {
     let mut agents = relay.agent_infos();
-    agents.retain(|a| waves.iter().flatten().any(|p| p.host == a.host));
+    agents.retain(|a| targets.iter().any(|p| p.host == a.host));
     for a in &mut agents {
         a.flakelets.clear();
     }
-    let accepted = Event::Accepted {
-        job: job.clone(),
+    Event::Accepted {
+        job: job.to_owned(),
         relay: RelayInfo {
             name: relay.cfg.name.clone(),
             version: proto::VERSION.into(),
             capabilities: Vec::new(),
         },
         agents,
-    };
-    let (tx, body) = Body::channel(64);
-    tokio::spawn(run_job(relay, job, waves, tx, accepted));
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(hyper::header::CONTENT_TYPE, "text/event-stream")
-        .header(hyper::header::CACHE_CONTROL, "no-cache")
-        .header("X-Accel-Buffering", "no")
-        .body(body)
-        .expect("static headers"))
+    }
 }
 
-/// Per-target id sent to the agent. Derived from the job so `/v1/jobs`
-/// can recompute it, distinct per flakelet so one host running two
-/// targets of the same job does not dedup them into one.
-fn agent_job_id(job: &str, target: &str) -> String {
-    job_id(job, target)
+type Out = mpsc::Sender<Bytes>;
+
+async fn emit(tx: &Out, ev: &Event) -> bool {
+    tx.send(Bytes::from(sse::encode(ev))).await.is_ok()
 }
 
-async fn run_job(
-    relay: Arc<Relay>,
-    job: String,
-    waves: Vec<Vec<Planned>>,
-    tx: mpsc::Sender<Bytes>,
-    accepted: Event,
-) {
-    let out = |ev: Event| {
-        let tx = tx.clone();
-        async move { tx.send(Bytes::from(sse::encode(&ev))).await.is_ok() }
-    };
-    if !out(accepted).await {
+async fn run_job(relay: Arc<Relay>, job: String, waves: Vec<Vec<Planned>>, tx: Out) {
+    let all: Vec<Planned> = waves.iter().flatten().cloned().collect();
+    if !emit(&tx, &accepted_event(&relay, &job, &all)).await {
         return;
     }
     let mut results: Vec<TargetStatus> = Vec::new();
@@ -269,123 +269,269 @@ async fn run_job(
             skipped.extend(wave.into_iter().map(|p| Target { target: p.target }));
             continue;
         }
-        if !out(Event::Wave { index }).await {
+        if !emit(&tx, &Event::Wave { index }).await {
             return;
         }
-        let Some(statuses) = run_wave(&relay, &job, &wave, &out).await else {
+        let w = Wave::open(&relay, &job, wave, |id, p| Frame::Start {
+            id,
+            flakelet: p.flakelet.clone(),
+            rule: p.rule.clone(),
+            options: BTreeMap::default(),
+        })
+        .await;
+        let Some(statuses) = w.stream(&tx, true).await else {
             return;
         };
         ok = statuses.iter().all(|t| t.status.ok());
         results.extend(statuses);
     }
     tracing::info!(job, ok, "deploy finished");
-    let _ = out(Event::Result {
-        ok,
-        targets: results,
-        skipped,
-    })
+    let _ = emit(
+        &tx,
+        &Event::Result {
+            ok,
+            targets: results,
+            skipped,
+        },
+    )
     .await;
 }
 
-/// Start every target of the wave and forward frames until each has a
-/// result. `None` if the client went away.
-async fn run_wave<F, Fut>(
-    relay: &Relay,
-    job: &str,
-    wave: &[Planned],
-    out: &F,
-) -> Option<Vec<TargetStatus>>
-where
-    F: Fn(Event) -> Fut,
-    Fut: Future<Output = bool>,
-{
-    let (tx, mut rx) = mpsc::unbounded_channel::<(usize, Frame)>();
-    let refused = |i: usize, reason: &str| {
-        let ack = Frame::Ack {
-            id: String::new(),
-            accepted: false,
-            reason: Some(reason.into()),
-        };
-        let _ = tx.send((i, ack));
-    };
-    for (i, p) in wave.iter().enumerate() {
-        let id = agent_job_id(job, &p.target);
-        let start = Frame::Start {
-            id: id.clone(),
-            flakelet: p.flakelet.clone(),
-            rule: p.rule.clone(),
-            options: BTreeMap::default(),
-        };
-        let sub = Sub {
-            index: i,
-            tx: tx.clone(),
-            start: start.clone(),
-        };
-        relay.subscribe(&p.host, &id, sub);
-        match relay.agent_tx(&p.host) {
-            Some(a) if a.send(Outgoing::Frame(start)).await.is_ok() => {}
-            _ => refused(i, "agent connection lost"),
+/// Targets of one wave subscribed on a shared channel, unsubscribed on
+/// drop. The per-target agent id is `job_id(job, target)` so `/v1/jobs`
+/// can recompute it and two flakelets on one host stay distinct.
+struct Wave {
+    relay: Arc<Relay>,
+    job: String,
+    targets: Vec<Planned>,
+    rx: mpsc::UnboundedReceiver<(usize, Frame)>,
+    finished: Vec<bool>,
+    /// Frames read during `probe` that `stream` still has to handle.
+    backlog: Vec<(usize, Frame)>,
+    _tx: mpsc::UnboundedSender<(usize, Frame)>,
+}
+
+impl Wave {
+    /// Subscribe every target and send it `first(id, target)`.
+    async fn open(
+        relay: &Arc<Relay>,
+        job: &str,
+        targets: Vec<Planned>,
+        first: impl Fn(String, &Planned) -> Frame,
+    ) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel::<(usize, Frame)>();
+        for (i, p) in targets.iter().enumerate() {
+            let id = job_id(job, &p.target);
+            let frame = first(id.clone(), p);
+            relay.subscribe(
+                &p.host,
+                &id,
+                Sub {
+                    index: i,
+                    tx: tx.clone(),
+                    start: frame.clone(),
+                },
+            );
+            let sent = match relay.agent_tx(&p.host) {
+                Some(a) => a.send(Outgoing::Frame(frame)).await.is_ok(),
+                None => false,
+            };
+            if !sent {
+                let ack = Frame::Ack {
+                    id,
+                    accepted: false,
+                    reason: Some("agent connection lost".into()),
+                };
+                let _ = tx.send((i, ack));
+            }
+        }
+        let finished = vec![false; targets.len()];
+        Self {
+            relay: relay.clone(),
+            job: job.to_owned(),
+            targets,
+            finished,
+            rx,
+            backlog: Vec::new(),
+            _tx: tx,
         }
     }
-    let unsubscribe = |p: &Planned| relay.unsubscribe(&p.host, &agent_job_id(job, &p.target));
-    let mut statuses = Vec::new();
-    // Highest seq forwarded per target. A reconnecting agent replays from
-    // the beginning and the client should not see lines twice.
-    let mut seen = vec![0u64; wave.len()];
-    while statuses.len() < wave.len() {
-        let (i, frame) = rx.recv().await.expect("we hold a sender");
-        let p = &wave[i];
-        let target = p.target.clone();
-        let mut events = Vec::new();
-        let done = match frame {
-            Frame::Log { seq, line, .. } => {
-                if seq > seen[i] {
-                    seen[i] = seq;
-                    events.push(Event::Log { target, seq, line });
+
+    /// After a `query`, drop targets whose agent does not know the id
+    /// or did not answer within `wait`.
+    async fn probe(mut self, wait: std::time::Duration) -> Self {
+        let mut known = vec![None::<bool>; self.targets.len()];
+        let deadline = tokio::time::Instant::now() + wait;
+        while known.iter().any(Option::is_none) {
+            let Ok(Some((i, frame))) = tokio::time::timeout_at(deadline, self.rx.recv()).await
+            else {
+                break;
+            };
+            match &frame {
+                Frame::Error { .. } => known[i] = Some(false),
+                Frame::Ack { accepted: true, .. } => known[i] = Some(true),
+                _ => {
+                    known[i].get_or_insert(true);
+                    self.backlog.push((i, frame));
                 }
-                None
             }
-            Frame::Progress { .. } => {
-                events.push(Event::Progress { target });
-                None
-            }
-            Frame::Done { body, .. } => Some(body),
-            Frame::Ack {
-                accepted: false,
-                reason,
-                ..
-            } => {
-                let line = format!("agent refused: {}", reason.unwrap_or_default());
-                events.push(Event::Log {
-                    target,
-                    seq: 0,
-                    line,
-                });
-                Some(DoneBody {
-                    status: Status::Failed,
-                    ..Default::default()
-                })
-            }
-            _ => None,
-        };
-        if let Some(body) = done {
-            unsubscribe(p);
-            relay.count_deploy(&p.rule, &p.host, &p.flakelet, body.status.as_str());
-            statuses.push(TargetStatus {
-                target: p.target.clone(),
-                status: body.status,
-            });
-            events.push(Event::Done {
-                target: p.target.clone(),
-                body,
-            });
         }
-        for ev in events {
-            if !out(ev).await {
-                wave.iter().for_each(unsubscribe);
-                return None;
+        for (i, k) in known.into_iter().enumerate() {
+            self.finished[i] = k != Some(true);
+        }
+        self
+    }
+
+    fn live(&self) -> Vec<Planned> {
+        self.targets
+            .iter()
+            .zip(&self.finished)
+            .filter(|(_, f)| !**f)
+            .map(|(p, _)| p.clone())
+            .collect()
+    }
+
+    /// Forward frames as events until each target has a result. `None`
+    /// if the client went away. `count` feeds the deploy metrics.
+    async fn stream(mut self, out: &Out, count: bool) -> Option<Vec<TargetStatus>> {
+        let mut statuses = Vec::new();
+        // Highest seq forwarded per target. A reconnecting agent replays
+        // from the beginning and the client should not see lines twice.
+        let mut seen = vec![0u64; self.targets.len()];
+        let mut backlog = std::mem::take(&mut self.backlog).into_iter();
+        while self.finished.iter().any(|f| !f) {
+            let (i, frame) = match backlog.next() {
+                Some(f) => f,
+                None => self.rx.recv().await.expect("we hold a sender"),
+            };
+            if self.finished[i] {
+                continue;
+            }
+            let p = self.targets[i].clone();
+            let target = p.target.clone();
+            let mut events = Vec::new();
+            let done = match frame {
+                Frame::Log { seq, line, .. } => {
+                    if seq > seen[i] {
+                        seen[i] = seq;
+                        events.push(Event::Log { target, seq, line });
+                    }
+                    None
+                }
+                Frame::Progress { .. } => {
+                    events.push(Event::Progress { target });
+                    None
+                }
+                Frame::Done { body, .. } => Some(body),
+                Frame::Ack {
+                    accepted: false,
+                    reason,
+                    ..
+                } => {
+                    let line = format!("agent refused: {}", reason.unwrap_or_default());
+                    events.push(Event::Log {
+                        target,
+                        seq: 0,
+                        line,
+                    });
+                    Some(DoneBody {
+                        status: Status::Failed,
+                        ..Default::default()
+                    })
+                }
+                _ => None,
+            };
+            if let Some(body) = done {
+                self.finished[i] = true;
+                if count {
+                    self.relay
+                        .count_deploy(&p.rule, &p.host, &p.flakelet, body.status.as_str());
+                }
+                statuses.push(TargetStatus {
+                    target: p.target.clone(),
+                    status: body.status,
+                });
+                events.push(Event::Done {
+                    target: p.target.clone(),
+                    body,
+                });
+            }
+            for ev in &events {
+                if !emit(out, ev).await {
+                    return None;
+                }
+            }
+        }
+        Some(statuses)
+    }
+}
+
+impl Drop for Wave {
+    fn drop(&mut self) {
+        for p in &self.targets {
+            self.relay
+                .unsubscribe(&p.host, &job_id(&self.job, &p.target));
+        }
+    }
+}
+
+/// `GET /v1/jobs/<client id>`: find the job's targets by asking every
+/// readable agent flakelet whether it knows the derived id, then stream
+/// what they have. Waves are not reconstructed.
+async fn jobs(
+    relay: Arc<Relay>,
+    peer: Vec<String>,
+    req: &Request<Incoming>,
+    client_id: &str,
+) -> Result<Resp, Resp> {
+    let principals = authenticate(&relay, peer, req).await?;
+    let job = job_id(&principals.join("\n"), client_id);
+    let policy = &relay.cfg.policy;
+    let mut candidates = Vec::new();
+    for a in relay.agent_infos() {
+        for f in a.flakelets {
+            if let Some(rule) = policy.rule_for(&principals, &a.host, &f.name) {
+                candidates.push(Planned {
+                    target: format!("{}/{}", a.host, f.name),
+                    host: a.host.clone(),
+                    flakelet: f.name,
+                    rule: rule.to_owned(),
+                });
             }
         }
     }
-    Some(statuses)
+    let wave = Wave::open(&relay, &job, candidates, |id, _| Frame::Query { id })
+        .await
+        .probe(std::time::Duration::from_secs(3))
+        .await;
+    let live = wave.live();
+    if live.is_empty() {
+        return Err(http::error(
+            StatusCode::NOT_FOUND,
+            "unknown_job",
+            "no connected agent knows this job",
+        ));
+    }
+    tracing::info!(job, targets = ?live.iter().map(|p| &p.target).collect::<Vec<_>>(), "job reattached");
+    let (tx, body) = Body::channel(64);
+    let accepted = accepted_event(&relay, &job, &live);
+    tokio::spawn(async move {
+        if !emit(&tx, &accepted).await || !emit(&tx, &Event::Wave { index: 0 }).await {
+            return;
+        }
+        let Some(targets) = wave.stream(&tx, false).await else {
+            return;
+        };
+        let ok = targets.iter().all(|t| t.status.ok());
+        let _ = emit(
+            &tx,
+            &Event::Result {
+                ok,
+                targets,
+                skipped: Vec::new(),
+            },
+        )
+        .await;
+    });
+    Ok(sse_response(body))
 }

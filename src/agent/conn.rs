@@ -1,6 +1,7 @@
 //! One WebSocket to one relay, reconnecting forever.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::Duration;
 
 use hyper::Request;
@@ -16,20 +17,27 @@ use crate::proto::{self, Frame, Named};
 use crate::ws::{self, Message, Role};
 
 /// Connection count published as systemd status text.
+#[derive(Default)]
 pub struct Connected {
-    total: usize,
-    n: std::sync::atomic::AtomicIsize,
+    total: AtomicIsize,
+    n: AtomicIsize,
 }
 
 impl Connected {
-    #[must_use]
-    pub fn new(total: usize) -> Self {
-        Self { total, n: 0.into() }
+    pub fn set_total(&self, total: usize) {
+        self.total.store(
+            isize::try_from(total).unwrap_or(isize::MAX),
+            Ordering::Relaxed,
+        );
+        self.add(0);
     }
 
     fn add(&self, d: isize) {
-        let n = self.n.fetch_add(d, std::sync::atomic::Ordering::Relaxed) + d;
-        let s = format!("connected to {n}/{} relays", self.total);
+        let n = self.n.fetch_add(d, Ordering::Relaxed) + d;
+        let s = format!(
+            "connected to {n}/{} relays",
+            self.total.load(Ordering::Relaxed)
+        );
         let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Status(&s)]);
     }
 }
@@ -182,6 +190,18 @@ impl Conn {
             }) => {
                 tracing::info!(id, flakelet, rule, relay, "start");
                 for f in self.jobs.start(&id, &flakelet) {
+                    writer.send(&f).await?;
+                }
+            }
+            Ok(Frame::Query { id }) => {
+                let frames = self.jobs.replay(&id).unwrap_or_else(|| {
+                    vec![Frame::Error {
+                        id: Some(id),
+                        code: "unknown_job".into(),
+                        message: "no such job on this agent".into(),
+                    }]
+                });
+                for f in frames {
                     writer.send(&f).await?;
                 }
             }

@@ -1,7 +1,6 @@
 //! JWT verification for RS256, ES256 and EdDSA against a JWKS.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
@@ -28,8 +27,6 @@ pub enum Error {
     Issuer,
     #[error("wrong audience")]
     Audience,
-    #[error("jti already used")]
-    Replay,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,8 +70,6 @@ pub struct Claims {
     pub exp: Option<u64>,
     #[serde(default)]
     pub nbf: Option<u64>,
-    #[serde(default)]
-    pub jti: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -217,30 +212,6 @@ pub fn principals(name: &str, claims: &Claims, principal_claims: &[String]) -> V
     out
 }
 
-/// Remembers `jti`s until their token expires so each is accepted once
-/// per relay process.
-#[derive(Default)]
-pub struct JtiSet {
-    seen: Mutex<HashMap<String, u64>>,
-}
-
-impl JtiSet {
-    pub fn check(&self, claims: &Claims, now: SystemTime) -> Result<(), Error> {
-        let Some(jti) = &claims.jti else {
-            return Ok(());
-        };
-        let now = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        let mut seen = self.seen.lock().expect("poisoned");
-        seen.retain(|_, exp| *exp + LEEWAY >= now);
-        let key = format!("{}\0{jti}", claims.iss);
-        if seen.contains_key(&key) {
-            return Err(Error::Replay);
-        }
-        seen.insert(key, claims.exp.unwrap_or(now + 3600));
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -285,7 +256,7 @@ pub(crate) mod tests {
         let (kp, jwks) = ed25519_issuer();
         let claims = serde_json::json!({
             "iss": "https://i", "sub": "repo:x", "aud": ["relay", "other"],
-            "exp": 1000, "jti": "a", "groups": ["admin", "dev"], "email": "j@x"
+            "exp": 1000, "groups": ["admin", "dev"], "email": "j@x"
         });
         let tok = sign_ed25519(&kp, &claims);
         let c = verify(&tok, &jwks, "https://i", "relay", now(900)).unwrap();
@@ -317,10 +288,6 @@ pub(crate) mod tests {
         let mut tampered = tok.clone();
         tampered.push('A');
         assert!(verify(&tampered, &jwks, "https://i", "relay", now(900)).is_err());
-
-        let jti = JtiSet::default();
-        jti.check(&c, now(900)).unwrap();
-        assert_eq!(jti.check(&c, now(901)).unwrap_err(), Error::Replay);
     }
 
     #[test]
