@@ -157,8 +157,11 @@ result   {ok, targets: [{target, status}], skipped: [{target}]}
 The job id is `hash(caller identity, client id)`, so retries are
 idempotent and other callers cannot collide with or attach to it. Errors before the
 stream starts: `403 {"code": "target_denied", "targets": [...]}`,
-`503 {"code": "agent_unavailable", "targets": [...]}` (retried by `push`
-for 30 s, then next relay), `400 {"code": "unsupported_option", ...}`.
+`404 {"code": "unknown_host", "targets": [...]}` for hosts the relay has
+no `agents` entry for,
+`503 {"code": "agent_unavailable", "targets": [...]}` when the agent is
+not connected right now (retried by `push` with backoff for 30 s, then
+next relay), `400 {"code": "unsupported_option", ...}`.
 
 `GET /v1/jobs/<client id>` re-derives the job id and streams the same
 events from the agents' tables, or 404 if no connected agent has it.
@@ -310,7 +313,7 @@ inputs change with the host. First install and relay-less periods fall
 to the `autoUpdate` timer. Policy is asserted at eval time with
 `check-policy`.
 
-VM test: two relays, an mTLS and an OIDC agent, minica, static mock
+NixOS container test with the real flakelet: two relays, an mTLS and an OIDC agent, minica, static mock
 issuer. Cases: deploy, unchanged, failing first wave, failover
 mid-stream, duplicate id, coalescing, agent restart mid-job, idle
 timeout, denied target, read filtering, foreign host, duplicate agent,
