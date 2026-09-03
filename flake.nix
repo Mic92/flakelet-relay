@@ -31,6 +31,7 @@
     {
       packages = forAllSystems (pkgs: {
         default = pkgs.callPackage ./nix/package.nix { craneLib = crane.mkLib pkgs; };
+        flakelet-push = pkgs.callPackage ./nix/flakelet-push.nix { };
       });
 
       formatter = forAllSystems (pkgs: (treefmtFor pkgs).config.build.wrapper);
