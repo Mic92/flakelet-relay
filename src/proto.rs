@@ -126,6 +126,11 @@ pub enum Frame {
         #[serde(flatten)]
         body: DoneBody,
     },
+    /// Like `start` for a known id but never runs anything. Unknown ids
+    /// get `error {code: unknown_job}`.
+    Query {
+        id: String,
+    },
     Error {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

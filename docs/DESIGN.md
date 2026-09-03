@@ -38,15 +38,17 @@ A connection yields a set of principals. A rule matches if any does.
 - An OIDC bearer token gives `oidc:<issuer>:<sub>` and
   `oidc:<issuer>:<claim>:<value>` for each configured `principalClaims`
   entry, one per element for list claims. Authelia's `sub` is a UUID, so
-  match on `email` or `groups` there. Each `jti` is accepted once per
-  relay. JWKS is cached on disk and used stale up to 24 h because nixbot
+  match on `email` or `groups` there. Tokens are bearer credentials for
+  their whole lifetime, so keep CI tokens short. JWKS is cached on disk and used stale up to 24 h because nixbot
   is both issuer and deploy target.
 - A TLS client cert gives one per SAN: `x509:dns:eliza.r`,
   `x509:email:joerg@thalheim.io`, `x509:uri:…`.
 
 No principal means 401. Agents without certs can use `tokenCommand`.
-`push login` does the OAuth2 device flow against Authelia and caches the
-token in `$XDG_STATE_HOME/flakelet-push/`.
+`push login --issuer <url> --client-id <id>` does the OAuth2 device flow
+and caches the `id_token` (plus refresh token if granted) in
+`$XDG_STATE_HOME/flakelet-push/token.json`. Later calls without a cert or
+token command use it and refresh it when it is about to expire.
 
 ## Listeners and certificates
 
@@ -65,7 +67,8 @@ step-ca ACME certs over `.r`, renewed by timer, reloaded on change.
 into `https://<target>:<port>` entries ordered by priority and weight.
 `push` walks the union. The agent connects to all of it and re-resolves
 on TTL expiry, at most every 60 s, so adding a relay is a DNS change. Lookup
-failure keeps the last set. TLS is verified against the SRV target name,
+failure keeps the last set. Lookups go through the system resolver
+(`res_query`), which works the same on glibc, musl and macOS. TLS is verified against the SRV target name,
 so DNS can only point at hosts with a cert from the pinned CA. Records
 live under `thalheim.io` to be resolvable from CI sandboxes.
 
@@ -163,8 +166,11 @@ no `agents` entry for,
 not connected right now (retried by `push` with backoff for 30 s, then
 next relay), `400 {"code": "unsupported_option", ...}`.
 
-`GET /v1/jobs/<client id>` re-derives the job id and streams the same
-events from the agents' tables, or 404 if no connected agent has it.
+`GET /v1/jobs/<client id>` re-derives the job id, sends `query` for it to
+every flakelet the caller may read and streams what the agents that know
+it have, as a single wave. 404 `unknown_job` if none does within 3 s.
+`push` goes there when its deploy stream breaks and skips lines it
+already printed.
 
 `GET /v1/agents` returns
 `{"agents": [{host, version, capabilities, flakelets: [{name, running?, pending?, last?: {status, generation, at}}]}]}`
@@ -188,8 +194,7 @@ frame, WS ping every 20 s.
 → log      {id, seq, line}
 → progress {id}
 → done     {id, status, generation?, tail?: [{line}]}
-← query    {id}
-→ replay   {id, flakelet, state, logs: [{seq, line}], done?: {…}}
+← query    {id}            (answered like a known start, or error unknown_job)
 ↔ error    {id?, code, message}
 ```
 
@@ -213,8 +218,10 @@ agent restarts (the agent may be what is updated), and the agent
 follows its journal from a saved cursor whether live or reattached.
 
 The job table is `$STATE_DIRECTORY/jobs/<id>.json` with flakelet,
-invocation id, cursor, state and result, kept for 24 h and reconciled
-against systemd on start. Pending `done`s go out on reconnect.
+journal cursor, generation before, state, logs and result, kept for
+24 h. On start the agent resumes running entries by following the unit
+from the cursor until it is gone and starts pending ones. Results reach
+the relay through the replay triggered by its re-sent `start`.
 
 A failed unit is `failed`. Otherwise the result comes from generation
 and health in `flakelet status --json` before and after. `failed` and `rolled-back` carry
@@ -302,7 +309,7 @@ Rust workspace with tribuchet-sized dependencies: tokio, rustls, hyper
 for HTTP/1.1 and the WS upgrade with hand-rolled framing and SSE, JWT
 verification for RS256/ES256/EdDSA on `ring`, serde. systemd is driven
 through `systemctl`, `busctl` and `journalctl --follow --cursor`.
-Crates are `proto`, `auth` (principals, JWKS, jti, policy,
+Crates are `proto`, `auth` (principals, JWKS, policy,
 `check-policy`), `relay`, `agent` and `push`. sd-notify and socket
 activation are shared with tribuchet. Common flags are `--cert/--key`,
 `--token-command` and `--ca-file`.
@@ -317,4 +324,4 @@ NixOS container test with the real flakelet: two relays, an mTLS and an OIDC age
 issuer. Cases: deploy, unchanged, failing first wave, failover
 mid-stream, duplicate id, coalescing, agent restart mid-job, idle
 timeout, denied target, read filtering, foreign host, duplicate agent,
-jti replay, claim principals, log cap, SRV add/remove.
+claim principals, log cap, SRV add/remove.

@@ -12,6 +12,7 @@ let
     lib.filterAttrs (_: v: v != null) {
       inherit (cfg)
         relays
+        relaySrv
         caFile
         flakelets
         tokenCommand
@@ -34,8 +35,16 @@ in
 
     relays = lib.mkOption {
       type = lib.types.listOf lib.types.str;
+      default = [ ];
       description = "Relay base URLs. The agent keeps a connection to each.";
       example = [ "https://relay1.example.org:7443" ];
+    };
+
+    relaySrv = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Domain whose `_flakelet-relay._tcp` SRV records list relays, in addition to `relays`.";
+      example = "example.org";
     };
 
     caFile = lib.mkOption {

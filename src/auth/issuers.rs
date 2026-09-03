@@ -5,14 +5,11 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-use base64::Engine as _;
-use http_body_util::BodyExt as _;
-use hyper::Request;
 use serde::Deserialize;
 
-use super::jwt::{self, JtiSet, Jwks};
-use crate::client::{Client, Url};
-use crate::http::Body;
+use super::jwt::{self, Jwks};
+use crate::client::Client;
+use crate::oidc;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,7 +35,6 @@ pub struct Issuers {
     cache: Mutex<BTreeMap<String, Cached>>,
     cache_dir: Option<PathBuf>,
     client: Client,
-    jti: JtiSet,
 }
 
 impl Issuers {
@@ -53,7 +49,6 @@ impl Issuers {
             cache: Mutex::default(),
             cache_dir,
             client,
-            jti: JtiSet::default(),
         };
         s.load_disk();
         s
@@ -91,35 +86,9 @@ impl Issuers {
         }
     }
 
-    async fn get_json<T: for<'a> Deserialize<'a>>(&self, url: &str) -> Result<T, String> {
-        let u = Url::parse(url).map_err(|e| e.to_string())?;
-        let req = Request::get(if u.path.is_empty() { "/" } else { &u.path })
-            .body(Body::empty())
-            .map_err(|e| e.to_string())?;
-        let resp = self.client.send(&u, req).await.map_err(|e| e.to_string())?;
-        if !resp.status().is_success() {
-            return Err(format!("{url}: {}", resp.status()));
-        }
-        let body = http_body_util::Limited::new(resp.into_body(), 1 << 20)
-            .collect()
-            .await
-            .map_err(|e| format!("{url}: {e}"))?
-            .to_bytes();
-        serde_json::from_slice(&body).map_err(|e| format!("{url}: {e}"))
-    }
-
     async fn fetch(&self, cfg: &IssuerConfig) -> Result<Jwks, String> {
-        #[derive(Deserialize)]
-        struct Discovery {
-            jwks_uri: String,
-        }
-        let d: Discovery = self
-            .get_json(&format!(
-                "{}/.well-known/openid-configuration",
-                cfg.url.trim_end_matches('/')
-            ))
-            .await?;
-        self.get_json(&d.jwks_uri).await
+        let d = oidc::discover(&self.client, &cfg.url).await?;
+        oidc::get_json(&self.client, &d.jwks_uri).await
     }
 
     /// JWKS for `name`, refreshing if older than 10 min and falling back
@@ -181,12 +150,7 @@ impl Issuers {
                 continue;
             };
             match jwt::verify(token, &jwks, &cfg.url, &cfg.audience, SystemTime::now()) {
-                Ok(claims) => {
-                    self.jti
-                        .check(&claims, SystemTime::now())
-                        .map_err(|e| e.to_string())?;
-                    return Ok(jwt::principals(name, &claims, &cfg.principal_claims));
-                }
+                Ok(claims) => return Ok(jwt::principals(name, &claims, &cfg.principal_claims)),
                 Err(jwt::Error::Issuer) => {}
                 Err(e) => last = e.to_string(),
             }
@@ -196,13 +160,8 @@ impl Issuers {
 }
 
 fn unverified_iss(token: &str) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Iss {
-        iss: String,
-    }
-    let p = token.split('.').nth(1)?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(p)
-        .ok()?;
-    serde_json::from_slice::<Iss>(&bytes).ok().map(|i| i.iss)
+    oidc::unverified_claims(token)?
+        .get("iss")?
+        .as_str()
+        .map(str::to_owned)
 }
