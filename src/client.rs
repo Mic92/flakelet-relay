@@ -75,11 +75,18 @@ impl Url {
     }
 
     #[must_use]
+    /// `Host` header value. The default port is left out because some
+    /// servers (Authelia) reject `host:443`.
     pub fn authority(&self) -> String {
-        if self.host.contains(':') {
-            format!("[{}]:{}", self.host, self.port)
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
         } else {
-            format!("{}:{}", self.host, self.port)
+            self.host.clone()
+        };
+        if self.port == 443 {
+            host
+        } else {
+            format!("{host}:{}", self.port)
         }
     }
 }
@@ -170,7 +177,7 @@ mod tests {
         );
         assert_eq!(
             u.join("/v1/agent").to_string(),
-            "https://relay.thalheim.io:443/api/v1/agent"
+            "https://relay.thalheim.io/api/v1/agent"
         );
         let u = Url::parse("https://[::1]:8080").unwrap();
         assert_eq!(
