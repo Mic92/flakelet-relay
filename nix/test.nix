@@ -335,6 +335,14 @@ in
         assert "rolled back" in out, out
         agent.succeed("systemctl show app.service -p Description | grep -q 'app v1'")
 
+    with subtest("detach returns once the job is accepted"):
+        set_app("${appSlow}")
+        out = client.succeed(f"timeout 20 {admin} deploy --detach agent/app 2>&1")
+        assert "detached" in out and "agent/app:" not in out, out
+        # The update still runs to completion on the agent.
+        agent.wait_until_succeeds("systemctl is-active flakelet-relay-job-app.service")
+        agent.wait_until_fails("systemctl is-active flakelet-relay-job-app.service", timeout=90)
+
     with subtest("unknown host is final, missing agent is retried, agents listing"):
         out = client.fail(f"{admin} deploy nope/app 2>&1")
         assert "unknown_host" in out, out

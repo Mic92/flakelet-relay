@@ -67,6 +67,10 @@ enum Cmd {
         /// Abort after this long overall.
         #[arg(long, default_value = "3600")]
         max_time: u64,
+        /// Exit 0 once the relay accepted the job instead of following it,
+        /// for deploys that restart the caller itself.
+        #[arg(long)]
+        detach: bool,
         /// `host/flakelet`, with `--wave` between waves.
         #[arg(required = true, num_args = 1.., allow_hyphen_values = true)]
         targets: Vec<String>,
@@ -272,6 +276,7 @@ async fn run(cli: Cli) -> Result<bool, String> {
             id,
             idle_timeout,
             max_time,
+            detach,
             targets,
         } => {
             let id = id.unwrap_or_else(random_id);
@@ -283,7 +288,7 @@ async fn run(cli: Cli) -> Result<bool, String> {
             };
             tokio::time::timeout(
                 Duration::from_secs(max_time),
-                deploy(&ctx, &req, Duration::from_secs(idle_timeout)),
+                deploy(&ctx, &req, Duration::from_secs(idle_timeout), detach),
             )
             .await
             .unwrap_or_else(|_| Err(format!("no result after {max_time}s")))
@@ -352,10 +357,18 @@ enum Followed {
 
 /// POST the deploy, follow the stream, and if a relay dies mid-stream
 /// resume via `GET /v1/jobs/<id>` on whichever relay answers.
-async fn deploy(ctx: &Ctx, dr: &DeployRequest, idle: Duration) -> Result<bool, String> {
+async fn deploy(
+    ctx: &Ctx,
+    dr: &DeployRequest,
+    idle: Duration,
+    detach: bool,
+) -> Result<bool, String> {
     let payload = serde_json::to_string(dr).expect("serializable");
     let path = format!("/v1/jobs/{}", dr.id);
-    let mut printer = Printer::default();
+    let mut printer = Printer {
+        detach,
+        ..Default::default()
+    };
     let mut first = true;
     loop {
         let body = open(ctx, |url| {
@@ -429,6 +442,8 @@ async fn open(
 /// not repeat lines.
 #[derive(Default)]
 struct Printer {
+    /// Report success as soon as the first wave started.
+    detach: bool,
     seen: std::collections::HashMap<String, u64>,
     done: std::collections::HashSet<String>,
 }
@@ -453,6 +468,10 @@ impl Printer {
             }
             Event::Wave { index } => {
                 let _ = writeln!(out, "» wave {index}");
+                if self.detach {
+                    let _ = writeln!(out, "» detached, not waiting for the result");
+                    return Some(true);
+                }
             }
             Event::Log { target, seq, line } => {
                 let seen = self.seen.entry(target.clone()).or_default();
