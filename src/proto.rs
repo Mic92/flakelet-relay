@@ -55,16 +55,39 @@ pub struct Line {
     pub line: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A flakelet as advertised in `hello`; everything but `name` is what
+/// `flakelet status` last reported and may be absent.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Named {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    /// Locked flake URL of the running generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Summary of one entry in an agent's job table, in `hello` and `job`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct JobRef {
     pub id: String,
     pub flakelet: String,
     pub state: JobState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
+    /// The id the caller chose, shared by all targets of one deploy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default)]
+    pub created: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<Status>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +103,9 @@ pub struct DoneBody {
     pub status: Status,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<u64>,
+    /// Locked flake URL after the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail: Option<Vec<Line>>,
 }
@@ -104,6 +130,12 @@ pub enum Frame {
         id: String,
         flakelet: String,
         rule: String,
+        /// Who asked and under which id, recorded in the job table so any
+        /// relay can list the deploy later.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
         #[serde(default)]
         options: BTreeMap<String, Value>,
     },
@@ -125,6 +157,11 @@ pub enum Frame {
         id: String,
         #[serde(flatten)]
         body: DoneBody,
+    },
+    /// Agent to relay whenever a job table entry is created or changes
+    /// state, so relays track jobs they did not start.
+    Job {
+        job: JobRef,
     },
     /// Like `start` for a known id but never runs anything. Unknown ids
     /// get `error {code: unknown_job}`.
@@ -247,6 +284,33 @@ pub struct AgentsResponse {
     pub agents: Vec<AgentInfo>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobTarget {
+    pub target: String,
+    pub state: JobState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<Status>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+}
+
+/// One deploy as reconstructed from the agents' job tables, keyed by
+/// the caller's id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobSummary {
+    pub id: String,
+    pub caller: String,
+    pub created: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished: Option<u64>,
+    pub targets: Vec<JobTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobsResponse {
+    pub jobs: Vec<JobSummary>,
+}
+
 /// `hash(caller identity, client id)` so retries are idempotent and
 /// other callers cannot attach to the job.
 #[must_use]
@@ -303,7 +367,7 @@ mod tests {
             body: DoneBody {
                 status: Status::RolledBack,
                 generation: Some(3),
-                tail: None,
+                ..Default::default()
             },
         })
         .unwrap();

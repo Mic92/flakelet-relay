@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use flakelet_relay::client::{Client, Url, token_command};
 use flakelet_relay::http::{self, Body};
 use flakelet_relay::proto::{
-    AgentsResponse, ApiError, DeployRequest, Event, Target, Wave, random_id,
+    AgentsResponse, ApiError, DeployRequest, Event, JobState, JobsResponse, Target, Wave, random_id,
 };
 use flakelet_relay::{oidc, srv, sse, tls};
 use http_body_util::BodyExt as _;
@@ -77,6 +77,8 @@ enum Cmd {
     },
     /// List connected agents visible to you.
     Agents,
+    /// List recent deploys visible to you, newest first.
+    Jobs,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -272,6 +274,7 @@ async fn run(cli: Cli) -> Result<bool, String> {
     match cli.cmd {
         Cmd::Login { .. } => unreachable!(),
         Cmd::Agents => agents(&ctx).await.map(|()| true),
+        Cmd::Jobs => job_list(&ctx).await.map(|()| true),
         Cmd::Deploy {
             id,
             idle_timeout,
@@ -322,18 +325,56 @@ fn parse_waves(args: &[String]) -> Result<Vec<Wave>, String> {
     Ok(waves)
 }
 
-async fn agents(ctx: &Ctx) -> Result<(), String> {
+async fn get_json<T: serde::de::DeserializeOwned>(ctx: &Ctx, path: &str) -> Result<T, String> {
     let body = open(ctx, |url| {
-        ctx.request(hyper::Method::GET, url, "/v1/agents", Body::empty())
+        ctx.request(hyper::Method::GET, url, path, Body::empty())
     })
     .await?;
-    let body = http::read_body(body, 1 << 20)
+    let body = http::read_body(body, 8 << 20)
         .await
-        .map_err(|_| "reading agents")?;
-    let a: AgentsResponse = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+        .map_err(|_| format!("reading {path}"))?;
+    serde_json::from_slice(&body).map_err(|e| e.to_string())
+}
+
+async fn agents(ctx: &Ctx) -> Result<(), String> {
+    let a: AgentsResponse = get_json(ctx, "/v1/agents").await?;
     for agent in a.agents {
-        let names: Vec<_> = agent.flakelets.into_iter().map(|f| f.name).collect();
+        let names: Vec<_> = agent
+            .flakelets
+            .into_iter()
+            .map(|f| match f.generation {
+                Some(g) => format!("{}@{g}", f.name),
+                None => f.name,
+            })
+            .collect();
         println!("{}\t{}\t{}", agent.host, agent.version, names.join(","));
+    }
+    Ok(())
+}
+
+async fn job_list(ctx: &Ctx) -> Result<(), String> {
+    let j: JobsResponse = get_json(ctx, "/v1/jobs").await?;
+    for job in j.jobs {
+        let targets: Vec<_> = job
+            .targets
+            .into_iter()
+            .map(|t| {
+                let s = match (t.state, t.status) {
+                    (JobState::Done, Some(s)) => s.as_str(),
+                    (JobState::Running, _) => "running",
+                    (JobState::Pending, _) => "pending",
+                    _ => "?",
+                };
+                format!("{}:{s}", t.target)
+            })
+            .collect();
+        let caller = job.caller.lines().next().unwrap_or_default();
+        println!(
+            "{}\t{}\t{caller}\t{}",
+            job.created,
+            job.id,
+            targets.join(" ")
+        );
     }
     Ok(())
 }

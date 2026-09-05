@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use crate::auth::issuers::Issuers;
-use crate::proto::{AgentInfo, Frame};
+use crate::proto::{AgentInfo, Frame, JobRef, JobState, JobSummary, JobTarget};
 use crate::relay::config::Config;
 
 /// An agent is considered alive if anything was read from it this
@@ -19,6 +19,8 @@ const ALIVE: Duration = Duration::from_secs(45);
 pub struct Agent {
     pub conn: u64,
     pub info: AgentInfo,
+    /// The agent's job table as of `hello`, kept current by `job` frames.
+    pub jobs: HashMap<String, JobRef>,
     pub tx: mpsc::Sender<Outgoing>,
     pub last_seen: Instant,
 }
@@ -91,6 +93,69 @@ impl Relay {
         {
             a.last_seen = Instant::now();
         }
+    }
+
+    /// Apply a `job` frame from `host`: remember the entry and, once done,
+    /// what the flakelet now runs.
+    pub fn record_job(&self, host: &str, conn: u64, job: JobRef) {
+        let mut agents = self.agents.lock().expect("poisoned");
+        let Some(a) = agents.get_mut(host).filter(|a| a.conn == conn) else {
+            return;
+        };
+        if job.state == JobState::Done
+            && let Some(f) = a.info.flakelets.iter_mut().find(|f| f.name == job.flakelet)
+        {
+            if job.generation.is_some() {
+                f.generation = job.generation;
+            }
+            if job.revision.is_some() {
+                f.revision.clone_from(&job.revision);
+            }
+        }
+        a.jobs.insert(job.id.clone(), job);
+    }
+
+    /// Deploys visible to `principals`, newest first, grouped across
+    /// hosts by caller and client id.
+    pub fn job_summaries(&self, principals: &[String]) -> Vec<JobSummary> {
+        let agents = self.agents.lock().expect("poisoned");
+        let mut by: HashMap<(&str, &str), JobSummary> = HashMap::new();
+        for (host, a) in agents.iter() {
+            for j in a.jobs.values() {
+                let (Some(caller), Some(cid)) = (&j.caller, &j.client_id) else {
+                    continue;
+                };
+                if self
+                    .cfg
+                    .policy
+                    .rule_for(principals, host, &j.flakelet)
+                    .is_none()
+                {
+                    continue;
+                }
+                let s = by.entry((caller, cid)).or_insert_with(|| JobSummary {
+                    id: cid.clone(),
+                    caller: caller.clone(),
+                    created: j.created,
+                    finished: j.finished,
+                    targets: Vec::new(),
+                });
+                s.created = s.created.min(j.created);
+                s.finished = s.finished.zip(j.finished).map(|(a, b)| a.max(b));
+                s.targets.push(JobTarget {
+                    target: format!("{host}/{}", j.flakelet),
+                    state: j.state,
+                    status: j.status,
+                    generation: j.generation,
+                });
+            }
+        }
+        let mut out: Vec<_> = by.into_values().collect();
+        for s in &mut out {
+            s.targets.sort_by(|a, b| a.target.cmp(&b.target));
+        }
+        out.sort_by(|a, b| b.created.cmp(&a.created).then_with(|| a.id.cmp(&b.id)));
+        out
     }
 
     pub fn agent_tx(&self, host: &str) -> Option<mpsc::Sender<Outgoing>> {

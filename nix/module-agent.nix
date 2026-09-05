@@ -20,6 +20,7 @@ let
       cert = cfg.certFile;
       key = cfg.keyFile;
       flakeletCommand = cfg.flakeletCommand;
+      inherit (cfg) retention;
     }
   );
 in
@@ -79,6 +80,24 @@ in
       type = lib.types.str;
       default = lib.getExe config.services.flakelets.package;
       defaultText = lib.literalExpression "lib.getExe config.services.flakelets.package";
+    };
+
+    retention = {
+      keepJobsDays = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 90;
+        description = "Days to keep job table entries.";
+      };
+      keepLogsDays = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 14;
+        description = "Days to keep a job's log; the summary stays for `keepJobsDays`.";
+      };
+      maxJobs = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 5000;
+        description = "Upper bound on entries, oldest dropped first.";
+      };
     };
   };
 

@@ -26,6 +26,28 @@ pub struct Config {
     pub flakelets: Vec<String>,
     #[serde(default = "default_flakelet")]
     pub flakelet_command: PathBuf,
+    #[serde(default)]
+    pub retention: Retention,
+}
+
+/// How long the job table keeps entries. Logs dominate the size, so
+/// they go first; summaries are a few hundred bytes each.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Retention {
+    pub keep_jobs_days: u64,
+    pub keep_logs_days: u64,
+    pub max_jobs: usize,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            keep_jobs_days: 90,
+            keep_logs_days: 14,
+            max_jobs: 5000,
+        }
+    }
 }
 
 fn default_flakelet() -> PathBuf {

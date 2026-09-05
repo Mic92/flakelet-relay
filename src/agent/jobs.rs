@@ -1,5 +1,6 @@
 //! Job table, dedup by id, coalescing of concurrent starts per flakelet,
-//! and persistence so a restarted agent picks running units back up.
+//! and persistence so a restarted agent picks running units back up and
+//! relays can list past deploys.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,11 +10,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 
+use crate::agent::config::Retention;
 use crate::agent::exec::{self, Run};
-use crate::proto::{DoneBody, Frame, JobRef, JobState, Status};
+use crate::proto::{DoneBody, Frame, JobRef, JobState, Named, Status};
 
 const LOG_CAP: usize = 1 << 20;
-const KEEP: Duration = Duration::from_hours(24);
+/// Per flakelet in `hello`, newest first. Bounds relay memory no matter
+/// how long agents keep history.
+const ADVERTISE: usize = 50;
 
 /// One `<id>.json` in the state directory. Logs are only written once
 /// the job is done. A running job's output is re-read from the journal.
@@ -22,6 +26,12 @@ struct Job {
     flakelet: String,
     state: JobState,
     created: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finished: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    caller: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     run: Option<Run>,
     #[serde(default)]
@@ -32,6 +42,23 @@ struct Job {
     truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     done: Option<DoneBody>,
+}
+
+impl Job {
+    fn summary(&self, id: &str) -> JobRef {
+        JobRef {
+            id: id.to_owned(),
+            flakelet: self.flakelet.clone(),
+            state: self.state,
+            caller: self.caller.clone(),
+            client_id: self.client_id.clone(),
+            created: self.created,
+            finished: self.finished,
+            status: self.done.as_ref().map(|d| d.status),
+            generation: self.done.as_ref().and_then(|d| d.generation),
+            revision: self.done.as_ref().and_then(|d| d.revision.clone()),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -51,6 +78,7 @@ pub struct Jobs {
     flakelets: Vec<String>,
     flakelet_cmd: PathBuf,
     dir: PathBuf,
+    retention: Retention,
     /// Live frames for all connections; each relay forwards what it has
     /// subscribers for.
     events: broadcast::Sender<Frame>,
@@ -64,25 +92,33 @@ fn now() -> u64 {
 }
 
 impl Jobs {
-    /// Load the table from `dir`, drop entries older than 24 h and resume
-    /// what was pending or running.
+    /// Load the table from `dir`, apply retention and resume what was
+    /// pending or running.
     #[must_use]
-    pub fn new(flakelets: Vec<String>, flakelet_cmd: PathBuf, dir: PathBuf) -> Arc<Self> {
+    pub fn new(
+        flakelets: Vec<String>,
+        flakelet_cmd: PathBuf,
+        dir: PathBuf,
+        retention: Retention,
+    ) -> Arc<Self> {
         let _ = std::fs::create_dir_all(&dir);
         let mut jobs = HashMap::new();
         for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
             let path = entry.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
             let Some(id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_owned) else {
                 continue;
             };
-            let job: Option<Job> = std::fs::read(&path)
+            match std::fs::read(&path)
                 .ok()
-                .and_then(|d| serde_json::from_slice(&d).ok());
-            match job {
-                Some(j) if j.created + KEEP.as_secs() > now() => {
+                .and_then(|d| serde_json::from_slice::<Job>(&d).ok())
+            {
+                Some(j) => {
                     jobs.insert(id, j);
                 }
-                _ => {
+                None => {
                     let _ = std::fs::remove_file(&path);
                 }
             }
@@ -95,10 +131,43 @@ impl Jobs {
             flakelets,
             flakelet_cmd,
             dir,
+            retention,
             events: broadcast::channel(4096).0,
         });
+        this.prune();
         this.resume();
         this
+    }
+
+    /// Drop finished jobs past `keepJobsDays` or beyond `maxJobs` (oldest
+    /// first) and strip logs past `keepLogsDays`. Runs at start and after
+    /// every update.
+    fn prune(&self) {
+        const DAY: u64 = 86400;
+        let now = now();
+        let r = &self.retention;
+        let mut inner = self.inner.lock().expect("poisoned");
+        let mut done: Vec<(u64, String)> = inner
+            .jobs
+            .iter()
+            .filter(|(_, j)| j.state == JobState::Done)
+            .map(|(id, j)| (j.created, id.clone()))
+            .collect();
+        done.sort_unstable();
+        let excess = inner.jobs.len().saturating_sub(r.max_jobs);
+        for (i, (created, id)) in done.iter().enumerate() {
+            if i < excess || created + r.keep_jobs_days * DAY <= now {
+                inner.jobs.remove(id);
+                let _ = std::fs::remove_file(self.dir.join(format!("{id}.json")));
+            } else if created + r.keep_logs_days * DAY <= now
+                && let Some(j) = inner.jobs.get_mut(id)
+                && !j.logs.is_empty()
+            {
+                j.logs.clear();
+                j.truncated = true;
+                self.save(&inner, id);
+            }
+        }
     }
 
     fn resume(self: &Arc<Self>) {
@@ -131,10 +200,14 @@ impl Jobs {
         }
     }
 
+    /// Persist `id` and tell connected relays about its new state.
     fn save(&self, inner: &Inner, id: &str) {
         let Some(job) = inner.jobs.get(id) else {
             return;
         };
+        let _ = self.events.send(Frame::Job {
+            job: job.summary(id),
+        });
         let data = serde_json::to_vec(job).expect("serializable");
         let path = self.dir.join(format!("{id}.json"));
         let tmp = path.with_extension("tmp");
@@ -143,21 +216,32 @@ impl Jobs {
         }
     }
 
+    /// Current generation and revision of every allowlisted flakelet.
+    pub async fn describe(&self) -> Vec<Named> {
+        let mut out = Vec::with_capacity(self.flakelets.len());
+        for f in &self.flakelets {
+            out.push(exec::describe(&self.flakelet_cmd, f).await);
+        }
+        out
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<Frame> {
         self.events.subscribe()
     }
 
+    /// Newest `ADVERTISE` jobs per flakelet plus anything not done.
     pub fn refs(&self) -> Vec<JobRef> {
-        self.inner
-            .lock()
-            .expect("poisoned")
-            .jobs
-            .iter()
-            .map(|(id, j)| JobRef {
-                id: id.clone(),
-                flakelet: j.flakelet.clone(),
-                state: j.state,
+        let inner = self.inner.lock().expect("poisoned");
+        let mut all: Vec<_> = inner.jobs.iter().collect();
+        all.sort_unstable_by_key(|(_, j)| std::cmp::Reverse(j.created));
+        let mut per: HashMap<&str, usize> = HashMap::new();
+        all.into_iter()
+            .filter(|(_, j)| {
+                let n = per.entry(&j.flakelet).or_default();
+                *n += 1;
+                *n <= ADVERTISE || j.state != JobState::Done
             })
+            .map(|(id, j)| j.summary(id))
             .collect()
     }
 
@@ -190,7 +274,13 @@ impl Jobs {
     /// Handle `start`, returning the frames to send on this connection.
     /// Known id: replay. Idle flakelet: run now. Busy: queue for one
     /// follow-up run.
-    pub fn start(self: &Arc<Self>, id: &str, flakelet: &str) -> Vec<Frame> {
+    pub fn start(
+        self: &Arc<Self>,
+        id: &str,
+        flakelet: &str,
+        caller: Option<String>,
+        client_id: Option<String>,
+    ) -> Vec<Frame> {
         let refuse = |reason: &str| {
             vec![Frame::Ack {
                 id: id.to_owned(),
@@ -214,6 +304,8 @@ impl Jobs {
                 flakelet: flakelet.to_owned(),
                 state: JobState::Pending,
                 created: now(),
+                caller,
+                client_id,
                 ..Default::default()
             },
         );
@@ -307,13 +399,14 @@ impl Jobs {
                 for id in &ids {
                     if let Some(j) = inner.jobs.get_mut(id) {
                         j.state = JobState::Done;
+                        j.finished = Some(now());
                         j.done = Some(done.clone());
                     }
-                    self.save(&inner, id);
                     let _ = self.events.send(Frame::Done {
                         id: id.clone(),
                         body: done.clone(),
                     });
+                    self.save(&inner, id);
                 }
                 let slot = inner
                     .slots
@@ -326,6 +419,7 @@ impl Jobs {
                 next
             };
             if next.is_empty() {
+                self.prune();
                 return;
             }
             ids = next;

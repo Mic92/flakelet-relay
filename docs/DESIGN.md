@@ -188,13 +188,15 @@ frame, WS ping every 20 s.
 
 ```
 ← welcome  {host, relay: {name, version, capabilities}}
-→ hello    {version, capabilities, flakelets: [{name}], jobs: [{id, flakelet, state}]}
-← start    {id, flakelet, rule, options: {}}
+→ hello    {version, capabilities, flakelets: [{name, generation?, revision?}],
+            jobs: [{id, flakelet, state, caller?, client_id?, created, finished?, status?, generation?, revision?}]}
+← start    {id, flakelet, rule, caller?, client_id?, options: {}}
 → ack      {id, accepted, reason?}
 → log      {id, seq, line}
 → progress {id}
 → done     {id, status, generation?, tail?: [{line}]}
 ← query    {id}            (answered like a known start, or error unknown_job)
+→ job      {job: {…as in hello}}   (on every state change, to all relays)
 ↔ error    {id?, code, message}
 ```
 
@@ -218,10 +220,19 @@ agent restarts (the agent may be what is updated), and the agent
 follows its journal from a saved cursor whether live or reattached.
 
 The job table is `$STATE_DIRECTORY/jobs/<id>.json` with flakelet,
-journal cursor, generation before, state, logs and result, kept for
-24 h. On start the agent resumes running entries by following the unit
+caller, client id, journal cursor, generation before, state, logs and
+result. Summaries are kept `keepJobsDays` (90), logs `keepLogsDays`
+(14), at most `maxJobs` (5000) entries; pruned at start and after each
+run. On start the agent resumes running entries by following the unit
 from the cursor until it is gone and starts pending ones. Results reach
 the relay through the replay triggered by its re-sent `start`.
+
+Relays persist nothing about jobs. `hello` carries the newest 50
+summaries per flakelet and every state change is sent as a `job` frame
+to all connected relays, so each relay can serve `GET /v1/jobs` (deploys
+grouped by caller and client id, filtered by the caller's read
+permission) and knows each flakelet's current generation and revision
+without having started the job itself.
 
 A failed unit is `failed`. Otherwise the result comes from generation
 and health in `flakelet status --json` before and after. `failed` and `rolled-back` carry
