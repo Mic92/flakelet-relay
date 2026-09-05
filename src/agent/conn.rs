@@ -38,7 +38,7 @@ impl Connected {
             "connected to {n}/{} relays",
             self.total.load(Ordering::Relaxed)
         );
-        let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Status(&s)]);
+        let _ = sd_notify::notify(&[sd_notify::NotifyState::Status(&s)]);
     }
 }
 
