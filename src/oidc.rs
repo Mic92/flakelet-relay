@@ -16,6 +16,8 @@ use crate::http::Body;
 pub struct Discovery {
     pub jwks_uri: String,
     #[serde(default)]
+    pub authorization_endpoint: Option<String>,
+    #[serde(default)]
     pub token_endpoint: Option<String>,
     #[serde(default)]
     pub device_authorization_endpoint: Option<String>,
@@ -76,7 +78,8 @@ pub async fn get_json<T: DeserializeOwned>(client: &Client, url: &str) -> Result
     read(url, resp).await
 }
 
-fn form_encode(fields: &[(&str, &str)]) -> String {
+#[must_use]
+pub fn form_encode(fields: &[(&str, &str)]) -> String {
     let mut out = String::new();
     for (k, v) in fields {
         if !out.is_empty() {

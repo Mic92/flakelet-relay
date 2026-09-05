@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use crate::auth::issuers::Issuers;
 use crate::proto::{AgentInfo, Frame, JobRef, JobState, JobSummary, JobTarget};
 use crate::relay::config::Config;
+use crate::relay::session::Signer;
 
 /// An agent is considered alive if anything was read from it this
 /// recently. Agents ping every 20 s.
@@ -39,9 +40,19 @@ pub struct Sub {
     pub start: Frame,
 }
 
+/// One flakelet on one connected host with its most recent job.
+pub struct HostFlakelet {
+    pub host: String,
+    pub flakelet: String,
+    pub generation: Option<u64>,
+    pub revision: Option<String>,
+    pub last: Option<JobRef>,
+}
+
 pub struct Relay {
     pub cfg: Config,
     pub issuers: Issuers,
+    pub signer: Signer,
     agents: Mutex<HashMap<String, Agent>>,
     /// (host, agent job id) → subscriber. Lives here rather than on the
     /// connection so a reconnecting agent's late `done` still arrives.
@@ -55,6 +66,7 @@ impl Relay {
         Self {
             cfg,
             issuers,
+            signer: Signer::default(),
             agents: Mutex::default(),
             subs: Mutex::default(),
             next_conn: AtomicU64::new(0),
@@ -113,6 +125,39 @@ impl Relay {
             }
         }
         a.jobs.insert(job.id.clone(), job);
+    }
+
+    /// Every (host, flakelet) `principals` may read, with its latest job.
+    pub fn host_flakelets(&self, principals: &[String]) -> Vec<HostFlakelet> {
+        let agents = self.agents.lock().expect("poisoned");
+        let mut out = Vec::new();
+        for (host, a) in agents.iter() {
+            for f in &a.info.flakelets {
+                if self
+                    .cfg
+                    .policy
+                    .rule_for(principals, host, &f.name)
+                    .is_none()
+                {
+                    continue;
+                }
+                let last = a
+                    .jobs
+                    .values()
+                    .filter(|j| j.flakelet == f.name)
+                    .max_by_key(|j| j.created)
+                    .cloned();
+                out.push(HostFlakelet {
+                    host: host.clone(),
+                    flakelet: f.name.clone(),
+                    generation: f.generation,
+                    revision: f.revision.clone(),
+                    last,
+                });
+            }
+        }
+        out.sort_by(|a, b| (&a.flakelet, &a.host).cmp(&(&b.flakelet, &b.host)));
+        out
     }
 
     /// Deploys visible to `principals`, newest first, grouped across

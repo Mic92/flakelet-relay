@@ -32,46 +32,67 @@ let
     echo '{"keys":['"$(cat $out/jwk.pub.json)"']}' > $out/www/.well-known/jwks.json
     cat > $out/www/.well-known/openid-configuration <<EOF
     {"issuer":"https://relay:8443","jwks_uri":"https://relay:8443/.well-known/jwks.json",
-     "token_endpoint":"https://relay:8443/token","device_authorization_endpoint":"https://relay:8443/device"}
+     "token_endpoint":"https://relay:8443/token","device_authorization_endpoint":"https://relay:8443/device",
+     "authorization_endpoint":"https://relay:8443/authorize"}
     EOF
   '';
 
-  # Device flow endpoints: the first token poll is pending, the second
-  # returns an id_token signed with the issuer key.
+  # Device flow: the first token poll is pending, the second returns an
+  # id_token signed with the issuer key. Authorization code flow:
+  # /authorize redirects straight back with a code, /token checks PKCE.
   deviceMock = pkgs.writers.writePython3 "device-mock" { flakeIgnore = [ "E501" ]; } ''
+    import base64
+    import hashlib
     import json
     import subprocess
     import time
+    import urllib.parse
     from http.server import BaseHTTPRequestHandler, HTTPServer
 
     polls = {}
+    codes = {}
+
+
+    def id_token(aud):
+        claims = json.dumps({"groups": ["wheel"], "email": "dev@example.org", "preferred_username": "someone"})
+        return subprocess.run(
+            ["${pkgs.step-cli}/bin/step", "crypto", "jwt", "sign", "--key", "${issuer}/jwk.json",
+             "--iss", "https://relay:8443", "--aud", aud, "--sub", "someone",
+             "--exp", str(int(time.time()) + 300), "--jti", str(time.time())],
+            input=claims, capture_output=True, text=True, check=True).stdout.strip()
 
 
     class H(BaseHTTPRequestHandler):
-        def do_POST(self):
-            n = int(self.headers.get("Content-Length", 0))
-            form = dict(kv.split("=", 1) for kv in self.rfile.read(n).decode().split("&") if kv)
-            if self.path == "/device":
-                body = {"device_code": "dev123", "user_code": "ABCD-EFGH", "verification_uri": "https://relay:8443/activate", "interval": 1}
-            elif polls.setdefault(form.get("device_code"), 0) == 0:
-                polls[form["device_code"]] = 1
-                self.send_response(400)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(b'{"error":"authorization_pending"}')
-                return
-            else:
-                claims = json.dumps({"groups": ["wheel"], "email": "dev@example.org"})
-                tok = subprocess.run(
-                    ["${pkgs.step-cli}/bin/step", "crypto", "jwt", "sign", "--key", "${issuer}/jwk.json",
-                     "--iss", "https://relay:8443", "--aud", form["client_id"], "--sub", "someone",
-                     "--exp", str(int(time.time()) + 300), "--jti", str(time.time())],
-                    input=claims, capture_output=True, text=True, check=True).stdout.strip()
-                body = {"id_token": tok, "access_token": "opaque", "token_type": "Bearer"}
-            self.send_response(200)
+        def reply(self, code, body):
+            self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(body).encode())
+
+        def do_GET(self):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            assert q["client_id"] == ["dashboard"] and q["code_challenge_method"] == ["S256"], q
+            codes["c0de"] = q["code_challenge"][0]
+            self.send_response(302)
+            self.send_header("Location", q["redirect_uri"][0] + "?code=c0de&state=" + q["state"][0])
+            self.end_headers()
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            form = dict(urllib.parse.parse_qsl(self.rfile.read(n).decode()))
+            if self.path == "/device":
+                body = {"device_code": "dev123", "user_code": "ABCD-EFGH", "verification_uri": "https://relay:8443/activate", "interval": 1}
+            elif form.get("grant_type") == "authorization_code":
+                digest = hashlib.sha256(form["code_verifier"].encode()).digest()
+                if codes.pop(form["code"], None) != base64.urlsafe_b64encode(digest).rstrip(b"=").decode() or form.get("client_secret") != "s3cret":
+                    return self.reply(400, {"error": "invalid_grant"})
+                body = {"id_token": id_token(form["client_id"]), "access_token": "opaque", "token_type": "Bearer"}
+            elif polls.setdefault(form.get("device_code"), 0) == 0:
+                polls[form["device_code"]] = 1
+                return self.reply(400, {"error": "authorization_pending"})
+            else:
+                body = {"id_token": id_token(form["client_id"]), "access_token": "opaque", "token_type": "Bearer"}
+            self.reply(200, body)
 
 
     HTTPServer(("127.0.0.1", 8089), H).serve_forever()
@@ -152,6 +173,8 @@ in
             url = "https://relay:8443";
             audience = "flakelet-relay";
             principalClaims = [ "groups" ];
+            login.clientId = "dashboard";
+            login.clientSecretFile = pkgs.writeText "secret" "s3cret";
           };
           agents.agent = [ "x509:dns:agent" ];
           groups.all = [ "agent" ];
@@ -204,6 +227,7 @@ in
           sslCertificate = "${certs}/relay/cert.pem";
           sslCertificateKey = "${certs}/relay/key.pem";
           root = "${issuer}/www";
+          locations."/authorize".proxyPass = "http://127.0.0.1:8089";
           locations."/device".proxyPass = "http://127.0.0.1:8089";
           locations."/token".proxyPass = "http://127.0.0.1:8089";
         };
@@ -427,5 +451,18 @@ in
         tok = token("repo:github:example/app:ref:refs/heads/main")
         out = client.succeed(f"FLAKELET_RELAY_TOKEN_COMMAND='echo {tok}' push --relay https://relay:7443 jobs")
         assert "agent/app:" in out and "agent/other" not in out, out
+
+    with subtest("dashboard login via authorization code flow"):
+        curl = "curl -sS --cacert ${certs}/ca.pem -b /tmp/jar -c /tmp/jar"
+        client.succeed(f"{curl} -o /dev/null -w '%{{http_code}} %{{redirect_url}}' https://relay:7443/ui/ | grep -q '303 https://relay:7443/ui/login'")
+        page = client.succeed(f"{curl} -L https://relay:7443/ui/login")
+        assert "Signed in as" in page and ">someone<" in page, page
+        assert ">app<" in page and ">other<" in page and "healthy" in page, page
+        jobs = client.succeed(f"{curl} https://relay:7443/ui/jobs")
+        assert "hist1"[:8] in jobs and "agent/other" in jobs, jobs
+        # The session cookie also authenticates the JSON API.
+        client.succeed(f"{curl} -f https://relay:7443/v1/jobs | grep -q hist1")
+        client.succeed(f"{curl} -X POST -o /dev/null https://relay:7443/ui/logout")
+        client.succeed(f"{curl} -o /dev/null -w '%{{http_code}}' https://relay:7443/ui/ | grep -q 303")
   '';
 }

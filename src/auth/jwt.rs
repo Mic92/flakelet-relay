@@ -100,7 +100,7 @@ pub fn verify(
     token: &str,
     jwks: &Jwks,
     issuer: &str,
-    audience: &str,
+    audiences: &[&str],
     now: SystemTime,
 ) -> Result<Claims, Error> {
     let mut parts = token.split('.');
@@ -128,20 +128,20 @@ pub fn verify(
     key?;
     let claims: Claims = serde_json::from_slice(&B64.decode(p).map_err(|_| Error::Malformed)?)
         .map_err(|_| Error::Malformed)?;
-    check_claims(claims, issuer, audience, now)
+    check_claims(claims, issuer, audiences, now)
 }
 
 fn check_claims(
     claims: Claims,
     issuer: &str,
-    audience: &str,
+    audiences: &[&str],
     now: SystemTime,
 ) -> Result<Claims, Error> {
     let now = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
     if claims.iss != issuer {
         return Err(Error::Issuer);
     }
-    if !claims.aud.contains(audience) {
+    if !audiences.iter().any(|a| claims.aud.contains(a)) {
         return Err(Error::Audience);
     }
     match claims.exp {
@@ -259,7 +259,7 @@ pub(crate) mod tests {
             "exp": 1000, "groups": ["admin", "dev"], "email": "j@x"
         });
         let tok = sign_ed25519(&kp, &claims);
-        let c = verify(&tok, &jwks, "https://i", "relay", now(900)).unwrap();
+        let c = verify(&tok, &jwks, "https://i", &["relay"], now(900)).unwrap();
         assert_eq!(
             principals(
                 "n",
@@ -274,20 +274,20 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(
-            verify(&tok, &jwks, "https://i", "relay", now(2000)).unwrap_err(),
+            verify(&tok, &jwks, "https://i", &["relay"], now(2000)).unwrap_err(),
             Error::Expired
         );
         assert_eq!(
-            verify(&tok, &jwks, "https://x", "relay", now(900)).unwrap_err(),
+            verify(&tok, &jwks, "https://x", &["relay"], now(900)).unwrap_err(),
             Error::Issuer
         );
         assert_eq!(
-            verify(&tok, &jwks, "https://i", "nope", now(900)).unwrap_err(),
+            verify(&tok, &jwks, "https://i", &["nope"], now(900)).unwrap_err(),
             Error::Audience
         );
         let mut tampered = tok.clone();
         tampered.push('A');
-        assert!(verify(&tampered, &jwks, "https://i", "relay", now(900)).is_err());
+        assert!(verify(&tampered, &jwks, "https://i", &["relay"], now(900)).is_err());
     }
 
     #[test]
@@ -314,6 +314,6 @@ pub(crate) mod tests {
         let msg = format!("{h}.{p}");
         let s = B64.encode(kp.sign(&rng, msg.as_bytes()).unwrap().as_ref());
         let tok = format!("{msg}.{s}");
-        assert_eq!(verify(&tok, &jwks, "i", "a", now(50)).unwrap().sub, "s");
+        assert_eq!(verify(&tok, &jwks, "i", &["a"], now(50)).unwrap().sub, "s");
     }
 }

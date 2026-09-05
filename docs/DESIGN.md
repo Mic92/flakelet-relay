@@ -287,30 +287,31 @@ Optional alert rules in the NixOS module: agent down or without relays
 
 ## Dashboard
 
-Served by the relay under `/ui/` on the localhost listener, so it sits
-behind the same nginx as the client API. Server-rendered HTML (maud),
-live updates through the existing SSE encoder and a few lines of inline
-`EventSource` script, no JS build.
+Served by the relay under `/ui/` on both listeners, so behind nginx it
+sits next to the client API. Server-rendered HTML (maud) and one static
+stylesheet, no script so far; `Content-Security-Policy` only allows
+same-origin styles and scripts.
 
 Login is OIDC authorization code flow with PKCE against one of the
-configured issuers (`issuers.<name>.login` with `clientId` and
-`clientSecretFile`). `/ui/login` redirects with `state` and the PKCE
-verifier kept in a short-lived signed cookie. `/ui/callback` exchanges
-the code, verifies the `id_token` with the same JWKS and claim mapping
-as bearer tokens and sets a session cookie holding principals and
-expiry, HMAC-signed with a key from `$STATE_DIRECTORY`, `HttpOnly;
-Secure; SameSite=Lax`, valid 12 h. There is no server-side session
-store. POSTs from the UI check `Origin` against the configured external
-URL.
+configured issuers (`issuers.<name>.login` with `clientId` and optional
+`clientSecretFile`; the client id is also accepted as token audience).
+`/ui/login` redirects with `state` and the PKCE verifier kept in a
+short-lived signed cookie, the redirect URI is `https://<Host>/ui/callback`.
+`/ui/callback` exchanges the code, verifies the `id_token` with the
+same JWKS and claim mapping as bearer tokens and sets a session cookie
+holding principals, display name and expiry, HMAC-signed with a
+per-process random key, `HttpOnly; Secure; SameSite=Lax`, valid 12 h.
+There is no server-side session store and a relay restart logs
+everyone out.
 
-A session is just another source of principals, so pages show what
-`/v1/agents` and `/v1/jobs` would show that user, and the deploy button
-is `POST /v1/deploy` with the cookie instead of a bearer token.
+A session is just another source of principals: the JSON API accepts
+the cookie too, and pages show exactly what `/v1/agents` and
+`/v1/jobs` would show that user.
 
-Pages: agents (host, version, flakelets with last result and
-generation), recent jobs across connected agents with status and
-caller, one job with its log following live, and a deploy form limited
-to targets the user's rules cover.
+Pages: flakelets (one row per flakelet across connected hosts with
+per-host state, revision or drift, last deploy and an overall status),
+hosts (agent version and flakelets with generation) and jobs (recent
+deploys with caller and per-target result).
 
 ## Implementation
 
