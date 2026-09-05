@@ -97,11 +97,10 @@ certificate from the pinned CA.
 
 ## Policy
 
-An example relay policy:
+An example relay config:
 
 ```nix
-services.flakelet-relay.settings = {
-  tls.clientCAs = [ ./ca.crt ];
+{
   issuers.ci  = { url = "https://ci.example.org"; audience = "flakelet-relay"; };
   issuers.sso = { url = "https://auth.example.org"; audience = "flakelet-relay";
                   principalClaims = [ "email" "groups" ]; login.clientId = "flakelet-relay"; };
@@ -121,7 +120,7 @@ services.flakelet-relay.settings = {
     admin.principals = [ "x509:email:root@example.org" "oidc:sso:groups:admin" ];
     admin.targets    = [ "*/*" ];
   };
-};
+}
 ```
 
 Rules are allow-only, unordered and use globs. Rule names show up in
@@ -140,9 +139,12 @@ On top of this the agent has its own `flakelets` allowlist, which is
 also what it advertises in `hello`.
 
 `flakelet-relay check-policy <config> <principal>... -- <target>...`
-evaluates the rules offline. The NixOS module runs it at build time for
-`policyChecks`, so a policy mistake fails the build rather than a
+evaluates the rules offline. The flakelet runs it at build time for
+`policyChecks`, so a policy mistake fails the update rather than a
 deploy.
+
+The relay itself is a flakelet so it deploys through its own agents;
+the agent is a NixOS module because it drives `flakelet`.
 
 ## Wire format rules
 
