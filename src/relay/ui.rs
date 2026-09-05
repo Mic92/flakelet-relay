@@ -1,18 +1,20 @@
-//! Server-rendered dashboard under `/ui/`: routing, pages and the job
-//! event stream as HTML fragments for htmx.
+//! Server-rendered dashboard under `/ui/`: routing, layout, actions and
+//! the event streams htmx subscribes to. Page bodies are in `pages`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
 use maud::{DOCTYPE, Markup, html};
 
-use crate::http::{self, Resp};
-use crate::proto::{self, DeployRequest, Event, JobState, Status, Target, Wave};
+use crate::http::{Body, Resp};
+use crate::proto::{self, DeployRequest, Event, JobState, Target, Wave};
 use crate::relay::api;
-use crate::relay::login::{self, Session, now};
-use crate::relay::state::{HostFlakelet, Relay};
+use crate::relay::login::{self, Session};
+use crate::relay::pages::{self, Filter};
+use crate::relay::state::Relay;
 
 /// htmx 4.0.0 and its SSE extension, vendored (0BSD).
 const STATIC: &[(&str, &str, &[u8])] = &[
@@ -33,8 +35,24 @@ pub(crate) fn redirect(to: &str) -> Resp {
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(hyper::header::LOCATION, to)
-        .body(http::Body::empty())
+        .body(Body::empty())
         .expect("static headers")
+}
+
+fn hx_redirect(to: &str) -> Resp {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("HX-Redirect", to)
+        .body(Body::empty())
+        .expect("static headers")
+}
+
+pub(crate) fn with_cookie(mut r: Resp, cookie: &str) -> Resp {
+    r.headers_mut().append(
+        hyper::header::SET_COOKIE,
+        cookie.parse().expect("cookie is ascii"),
+    );
+    r
 }
 
 fn page(status: StatusCode, m: &Markup) -> Resp {
@@ -57,25 +75,40 @@ pub(crate) fn fail(status: StatusCode, msg: &str) -> Resp {
             "",
             None,
             "",
+            None,
             &html! { main { p.notice { (msg) } p { a href="/ui/login" { "Log in again" } } } },
         ),
     )
 }
 
-/// Raw query parameter. All values handled here are URL-safe tokens.
-pub(crate) fn query<'a>(req: &'a Request<Incoming>, key: &str) -> Option<&'a str> {
+/// Query parameter, percent-decoded.
+pub(crate) fn query(req: &Request<Incoming>, key: &str) -> Option<String> {
     req.uri().query()?.split('&').find_map(|kv| {
         let (k, v) = kv.split_once('=')?;
-        (k == key).then_some(v)
+        (k == key).then(|| percent_decode(v))
     })
 }
 
-pub(crate) fn with_cookie(mut r: Resp, cookie: &str) -> Resp {
-    r.headers_mut().append(
-        hyper::header::SET_COOKIE,
-        cookie.parse().expect("cookie is ascii"),
-    );
-    r
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() => {
+                if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                    out.push(v);
+                    i += 2;
+                } else {
+                    out.push(b'%');
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 pub async fn handle(relay: Arc<Relay>, req: Request<Incoming>) -> Resp {
@@ -86,37 +119,54 @@ pub async fn handle(relay: Arc<Relay>, req: Request<Incoming>) -> Resp {
             Some((_, mime, data)) => Response::builder()
                 .header(hyper::header::CONTENT_TYPE, *mime)
                 .header(hyper::header::CACHE_CONTROL, "max-age=3600")
-                .body(http::Body::Full(Some(bytes::Bytes::from_static(data))))
+                .body(Body::Full(Some(bytes::Bytes::from_static(data))))
                 .expect("static headers"),
             None => fail(StatusCode::NOT_FOUND, "no such file"),
         },
         (&Method::GET, ["login"]) => login::start(&relay, &req).await,
         (&Method::GET, ["callback"]) => login::callback(&relay, &req).await,
         (&Method::POST, ["logout"]) => login::logout(),
-        (&Method::POST, ["deploy"]) => deploy(relay, &req),
+        (&Method::POST, ["deploy"]) => action(relay, &req, deploy_targets),
+        (&Method::POST, ["retry"]) => action(relay, &req, retry_targets),
         (&Method::GET, rest) => {
             let Some(sess) = login::current(&relay, &req) else {
                 return redirect("/ui/login");
             };
             let p = &sess.principals;
-            let (tab, body) = match rest {
-                [""] => ("", flakelets_page(&relay, p)),
-                ["hosts"] => ("hosts", hosts_page(&relay, p)),
-                ["jobs"] => ("jobs", jobs_page(&relay, p)),
-                ["jobs", id] => ("jobs", job_page(&relay, p, id)),
+            let q = query(&req, "q").unwrap_or_default();
+            let f = Filter::parse(&q);
+            let (tab, live, body) = match rest {
+                [""] => ("", true, pages::flakelets(&relay, p, &f)),
+                ["flakelets", name] => ("", true, pages::flakelet(&relay, p, name)),
+                ["hosts"] => ("hosts", true, pages::hosts(&relay, p, &f)),
+                ["jobs"] => ("jobs", true, pages::jobs(&relay, p, &f)),
+                ["jobs", id] => ("jobs", false, pages::job(&relay, p, id)),
                 ["jobs", id, "events"] => return job_events(relay.clone(), p, id).await,
+                ["events"] => return page_events(relay.clone(), sess, &req),
                 _ => return fail(StatusCode::NOT_FOUND, "no such page"),
             };
+            // List pages re-render `#main` whenever the relay's view changes.
+            let events = live.then(|| format!("/ui/events?path={}&q={}", path, oidc_enc(&q)));
             page(
                 StatusCode::OK,
-                &layout(&relay.cfg.name, Some(&sess), tab, &body),
+                &layout(&relay.cfg.name, Some(&sess), tab, events.as_deref(), &body),
             )
         }
         _ => fail(StatusCode::NOT_FOUND, "no such page"),
     }
 }
 
-fn layout(name: &str, sess: Option<&Session>, tab: &str, body: &Markup) -> Markup {
+fn oidc_enc(s: &str) -> String {
+    crate::oidc::form_encode(&[("", s)])[1..].to_owned()
+}
+
+fn layout(
+    name: &str,
+    sess: Option<&Session>,
+    tab: &str,
+    events: Option<&str>,
+    body: &Markup,
+) -> Markup {
     let nav = [("", "Flakelets"), ("hosts", "Hosts"), ("jobs", "Jobs")];
     html! {
         (DOCTYPE)
@@ -145,174 +195,56 @@ fn layout(name: &str, sess: Option<&Session>, tab: &str, body: &Markup) -> Marku
                         }
                     }
                 }
-                div #main tabindex="-1" { (body) }
+                div #main tabindex="-1" hx-sse:connect=[events] hx-swap="innerMorph" { (body) }
             }
         }
     }
 }
 
-fn ago(ts: u64) -> String {
-    let d = now().saturating_sub(ts);
-    match d {
-        0..60 => format!("{d}s ago"),
-        60..3600 => format!("{}m ago", d / 60),
-        3600..86_400 => format!("{}h ago", d / 3600),
-        _ => format!("{}d ago", d / 86_400),
-    }
+type Targets = fn(&Relay, &[String], &str) -> Vec<String>;
+
+/// "Update now": every host the user may see `flakelet` on.
+fn deploy_targets(relay: &Relay, principals: &[String], flakelet: &str) -> Vec<String> {
+    relay
+        .host_flakelets(principals)
+        .into_iter()
+        .filter(|h| h.flakelet == flakelet)
+        .map(|h| format!("{}/{}", h.host, h.flakelet))
+        .collect()
 }
 
-/// CSS class and label for one target's state.
-fn state_of(state: JobState, status: Option<Status>) -> (&'static str, &'static str) {
-    match (state, status) {
-        (JobState::Pending, _) => ("running", "pending"),
-        (JobState::Running, _) => ("running", "updating"),
-        (JobState::Done, Some(s)) => (if s.ok() { "ok" } else { "failed" }, s.as_str()),
-        (JobState::Done | JobState::Unknown, _) => ("failed", "unknown"),
-    }
+/// "Retry failed": the targets of deploy `id` that did not end ok.
+fn retry_targets(relay: &Relay, principals: &[String], id: &str) -> Vec<String> {
+    relay
+        .job_summaries(principals)
+        .into_iter()
+        .find(|j| j.id == id)
+        .into_iter()
+        .flat_map(|j| j.targets)
+        .filter(|t| t.state == JobState::Done && !t.status.is_some_and(proto::Status::ok))
+        .map(|t| t.target)
+        .collect()
 }
 
-fn last_state(h: &HostFlakelet) -> (&'static str, &'static str) {
-    h.last
-        .as_ref()
-        .map_or(("never", "never deployed"), |j| state_of(j.state, j.status))
-}
-
-fn short_rev(r: &str) -> &str {
-    let tail = r.rsplit(['/', ':', '=']).next().unwrap_or(r);
-    &tail[..tail.len().min(12)]
-}
-
-fn flakelets_page(relay: &Relay, principals: &[String]) -> Markup {
-    let rows = relay.host_flakelets(principals);
-    let mut by: BTreeMap<&str, Vec<&HostFlakelet>> = BTreeMap::new();
-    for r in &rows {
-        by.entry(&r.flakelet).or_default().push(r);
-    }
-    html! { main {
-        table {
-            caption.sr { "Flakelets across connected hosts" }
-            thead { tr {
-                th scope="col" { "Flakelet" }
-                th scope="col" { "Hosts" }
-                th scope="col" { "Revision" }
-                th scope="col" { "Last deploy" }
-                th scope="col" { "Status" }
-                th scope="col" { span.sr { "Actions" } }
-            } }
-            tbody {
-                @if by.is_empty() { tr { td colspan="6" .dim { "No connected host runs a flakelet you may see." } } }
-                @for (name, hosts) in &by {
-                    @let last = hosts.iter().filter_map(|h| h.last.as_ref()).max_by_key(|j| j.created);
-                    @let revs: std::collections::BTreeSet<_> = hosts.iter().filter_map(|h| h.revision.as_deref()).collect();
-                    @let bad = hosts.iter().filter(|h| last_state(h).0 == "failed").count();
-                    @let running = hosts.iter().any(|h| last_state(h).0 == "running");
-                    @let (cls, label) = if running { ("updating", "updating") }
-                        else if bad > 0 { ("degraded", "degraded") }
-                        else if revs.len() > 1 { ("drift", "drift") }
-                        else { ("healthy", "healthy") };
-                    tr {
-                        th scope="row" .name { (name) }
-                        td {
-                            span.sq aria-hidden="true" {
-                                @for h in hosts { span class=(last_state(h).0) title={(h.host) ": " (last_state(h).1)} {} }
-                            }
-                            (hosts.len() - bad) "/" (hosts.len())
-                            span.sr { " hosts ok" }
-                        }
-                        td.mono {
-                            @match revs.len() {
-                                0 => span.faint { "–" },
-                                1 => span title=(revs.first().unwrap()) { (short_rev(revs.first().unwrap())) },
-                                n => span.st.drift { (n) " revisions" },
-                            }
-                        }
-                        td {
-                            @if let Some(j) = last {
-                                (ago(j.created))
-                                @if let Some(c) = &j.caller { span.dim title=(c) { " by " (short(c)) } }
-                            } @else { span.faint { "–" } }
-                        }
-                        td { span class={"pill " (cls)} { (label) } }
-                        td.act {
-                            button hx-post={"/ui/deploy?flakelet=" (name)} hx-target="#main" hx-select="#main" hx-swap="outerHTML"
-                                hx-confirm={"Run flakelet update " (name) " on " (hosts.len()) " host(s) now?"}
-                                { "Update now" }
-                        }
-                    }
-                }
-            }
-        }
-    } }
-}
-
-fn hosts_page(relay: &Relay, principals: &[String]) -> Markup {
-    let agents = relay.visible_agents(principals);
-    html! { main {
-        table {
-            caption.sr { "Connected hosts" }
-            thead { tr { th scope="col" { "Host" } th scope="col" { "Agent" } th scope="col" { "Flakelets" } } }
-            tbody {
-                @if agents.is_empty() { tr { td colspan="3" .dim { "No connected hosts." } } }
-                @for a in &agents {
-                    tr {
-                        th scope="row" .name { (a.host) }
-                        td.dim { (a.version) }
-                        td {
-                            @for f in &a.flakelets {
-                                span.tag { (f.name) @if let Some(g) = f.generation { span.faint { "@" (g) } } } " "
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } }
-}
-
-fn jobs_page(relay: &Relay, principals: &[String]) -> Markup {
-    let jobs = relay.job_summaries(principals);
-    html! { main {
-        table {
-            caption.sr { "Recent deploys, newest first" }
-            thead { tr { th scope="col" { "When" } th scope="col" { "Caller" } th scope="col" { "Targets" } th scope="col" { "Id" } } }
-            tbody {
-                @if jobs.is_empty() { tr { td colspan="4" .dim { "No deploys recorded." } } }
-                @for j in jobs.iter().take(200) {
-                    tr {
-                        td { (ago(j.created)) }
-                        td.trunc title=(j.caller) { (short(&j.caller)) }
-                        td.wrap {
-                            @for t in &j.targets { (pill(&t.target, t.state, t.status)) " " }
-                        }
-                        td.mono { a href={"/ui/jobs/" (j.id)} { (j.id.get(..8).unwrap_or(&j.id)) } }
-                    }
-                }
-            }
-        }
-    } }
-}
-
-/// "Update now": a one-wave deploy of `flakelet` on every host the user
-/// may see it on. htmx always sends `HX-Request`, which a cross-site
-/// form cannot, so together with `SameSite=Lax` that is the CSRF check.
-fn deploy(relay: Arc<Relay>, req: &Request<Incoming>) -> Resp {
+/// Run a one-wave deploy of whatever `targets` selects for `?arg=` and
+/// send the browser to its job page. htmx always sends `HX-Request`,
+/// which a cross-site form cannot, so together with `SameSite=Lax` that
+/// is the CSRF check.
+fn action(relay: Arc<Relay>, req: &Request<Incoming>, targets: Targets) -> Resp {
     let Some(sess) = login::current(&relay, req) else {
         return hx_redirect("/ui/login");
     };
     if req.headers().get("HX-Request").is_none() {
         return fail(StatusCode::FORBIDDEN, "not an htmx request");
     }
-    let Some(flakelet) = query(req, "flakelet") else {
-        return fail(StatusCode::BAD_REQUEST, "no flakelet");
-    };
-    let targets = relay
-        .host_flakelets(&sess.principals)
+    let arg = query(req, "arg").unwrap_or_default();
+    let targets: Vec<Target> = targets(&relay, &sess.principals, &arg)
         .into_iter()
-        .filter(|h| h.flakelet == flakelet)
-        .map(|h| Target {
-            target: format!("{}/{}", h.host, h.flakelet),
-        })
+        .map(|target| Target { target })
         .collect();
+    if targets.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "nothing to deploy");
+    }
     let id = proto::random_id();
     let dr = DeployRequest {
         id: id.clone(),
@@ -330,86 +262,76 @@ fn deploy(relay: Arc<Relay>, req: &Request<Incoming>) -> Resp {
     }
 }
 
-fn hx_redirect(to: &str) -> Resp {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header("HX-Redirect", to)
-        .body(http::Body::empty())
-        .expect("static headers")
-}
-
-/// Element id for a target; hex because host and flakelet names may
-/// contain characters that are awkward in CSS selectors.
-fn target_id(target: &str) -> String {
-    format!("t-{}", proto::hex(target.as_bytes()))
-}
-
-fn pill(target: &str, state: JobState, status: Option<Status>) -> Markup {
-    let (cls, label) = state_of(state, status);
-    html! { span class={"pill " (cls)} { (target) span.sr { ": " } " " span.l { (label) } } }
-}
-
-fn target_row(target: &str, state: JobState, status: Option<Status>) -> Markup {
-    html! { li id=(target_id(target)) { (pill(target, state, status)) } }
-}
-
-/// First principal only; the full caller is in the title attribute.
-fn short(caller: &str) -> &str {
-    caller.lines().next().unwrap_or_default()
-}
-
-fn job_page(relay: &Relay, principals: &[String], id: &str) -> Markup {
-    let summary = relay
-        .job_summaries(principals)
-        .into_iter()
-        .find(|j| j.id == id);
-    html! { main.job {
-        h2 { "Deploy " span.mono { (id.get(..8).unwrap_or(id)) } }
-        @if let Some(j) = &summary {
-            p.dim { (ago(j.created)) " by " span title=(j.caller) { (short(&j.caller)) } }
-        }
-        ul.targets #targets aria-live="polite" {
-            @if let Some(j) = &summary {
-                @for t in &j.targets {
-                    (target_row(&t.target, t.state, t.status))
-                }
-            }
-        }
-        h3 { "Log" }
-        pre.log #log role="log" aria-live="off"
-            hx-sse:connect={"/ui/jobs/" (id) "/events"} hx-swap="beforeend" hx-sse:close="result" {}
-    } }
-}
-
-/// The job's event stream rendered as HTML fragments for the SSE
-/// extension: unnamed messages are appended to the log, target state
-/// changes ride along as `<hx-partial>`, and `result` closes the stream.
+/// The job's event stream as HTML fragments: unnamed messages are
+/// appended to the log, target state and the action bar ride along as
+/// `<hx-partial>`, and `result` closes the stream.
 async fn job_events(relay: Arc<Relay>, principals: &[String], id: &str) -> Resp {
     let rx = match api::open_job(relay, principals, id).await {
         Ok(rx) => rx,
         Err(resp) => return resp,
     };
-    api::sse_response(rx, encode_event)
-}
-
-fn encode_event(ev: &Event) -> String {
-    let m: Markup = match ev {
-        Event::Log { target, line, .. } => html! { span.t { (target) } " " (line) "\n" },
-        Event::Done { target, body } => html! {
-            hx-partial hx-target={"#" (target_id(target))} hx-swap="outerHTML" {
-                (target_row(target, JobState::Done, Some(body.status)))
+    let id = id.to_owned();
+    api::sse_response(rx, move |ev| match ev {
+        Event::Log { target, line, .. } => sse_html(&html! { span.t { (target) } " " (line) "\n" }),
+        Event::Done { target, body } => sse_html(&html! {
+            hx-partial hx-target={"#" (pages::target_id(target))} hx-swap="outerHTML" {
+                (pages::target_row(target, JobState::Done, Some(body.status)))
             }
             @for l in body.tail.iter().flatten() { span.tail { (target) " │ " (l.line) "\n" } }
-        },
-        Event::Accepted { .. } | Event::Wave { .. } | Event::Progress { .. } | Event::Unknown => {
-            return String::from(":\n\n");
+        }),
+        Event::Result { ok, .. } => format!(
+            "{}event: result\ndata: {ok}\n\n",
+            sse_html(
+                &html! { hx-partial hx-target="#actions" hx-swap="outerHTML" { (pages::job_actions(&id, Some(*ok))) } }
+            )
+        ),
+        _ => String::from(":\n\n"),
+    })
+}
+
+/// Re-rendered page body whenever agents connect, disconnect or report
+/// a job, at most twice a second, plus a comment every 30 s so proxies
+/// keep the stream open.
+fn page_events(relay: Arc<Relay>, sess: Session, req: &Request<Incoming>) -> Resp {
+    let path = query(req, "path").unwrap_or_default();
+    let f = Filter::parse(&query(req, "q").unwrap_or_default());
+    let (tx, body) = Body::channel(4);
+    let mut changed = relay.changed.subscribe();
+    tokio::spawn(async move {
+        loop {
+            let tick = tokio::time::timeout(Duration::from_secs(30), changed.recv()).await;
+            let chunk = if tick.is_ok() {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                changed = changed.resubscribe();
+                let p = &sess.principals;
+                let seg: Vec<&str> = path.split('/').collect();
+                let body = match seg.as_slice() {
+                    ["hosts"] => pages::hosts(&relay, p, &f),
+                    ["jobs"] => pages::jobs(&relay, p, &f),
+                    ["flakelets", name] => pages::flakelet(&relay, p, name),
+                    _ => pages::flakelets(&relay, p, &f),
+                };
+                sse_html(&body)
+            } else {
+                String::from(":\n\n")
+            };
+            if tx.send(bytes::Bytes::from(chunk)).await.is_err() {
+                return;
+            }
         }
-        Event::Result { ok, .. } => {
-            return format!("event: result\ndata: {ok}\n\n");
-        }
-    };
+    });
+    Response::builder()
+        .header(hyper::header::CONTENT_TYPE, "text/event-stream")
+        .header(hyper::header::CACHE_CONTROL, "no-cache")
+        .header("X-Accel-Buffering", "no")
+        .body(body)
+        .expect("static headers")
+}
+
+/// One unnamed SSE message; a `data:` line per line of markup.
+fn sse_html(m: &Markup) -> String {
     let mut out = String::new();
-    for line in m.into_string().lines() {
+    for line in m.0.lines() {
         out.push_str("data: ");
         out.push_str(line);
         out.push('\n');

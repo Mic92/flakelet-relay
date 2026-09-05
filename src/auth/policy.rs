@@ -59,18 +59,32 @@ impl Policy {
             .map(|(n, _)| n.as_str())
     }
 
-    fn target_matches(&self, pattern: &str, host: &str, flakelet: &str) -> bool {
-        let Some((hp, fp)) = pattern.split_once('/') else {
-            return false;
-        };
-        let host_ok = match hp.strip_prefix('@') {
+    /// Whether any rule of `principals` covers some flakelet on `host`.
+    #[must_use]
+    pub fn sees_host(&self, principals: &[String], host: &str) -> bool {
+        self.rules.values().any(|r| {
+            r.principals.iter().any(|p| principals.contains(p))
+                && r.targets.iter().any(|t| {
+                    t.split_once('/')
+                        .is_some_and(|(hp, _)| self.host_matches(hp, host))
+                })
+        })
+    }
+
+    fn host_matches(&self, pattern: &str, host: &str) -> bool {
+        match pattern.strip_prefix('@') {
             Some(g) => self
                 .groups
                 .get(g)
                 .is_some_and(|m| m.iter().any(|m| glob(m, host))),
-            None => glob(hp, host),
-        };
-        host_ok && glob(fp, flakelet)
+            None => glob(pattern, host),
+        }
+    }
+
+    fn target_matches(&self, pattern: &str, host: &str, flakelet: &str) -> bool {
+        pattern
+            .split_once('/')
+            .is_some_and(|(hp, fp)| self.host_matches(hp, host) && glob(fp, flakelet))
     }
 
     /// Config mistakes worth failing on at load time.

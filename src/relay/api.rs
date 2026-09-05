@@ -243,7 +243,10 @@ pub fn start_deploy(
 }
 
 /// Stream `events` through `encode` as a `text/event-stream` body.
-pub fn sse_response(mut events: mpsc::Receiver<Event>, encode: fn(&Event) -> String) -> Resp {
+pub fn sse_response(
+    mut events: mpsc::Receiver<Event>,
+    encode: impl Fn(&Event) -> String + Send + 'static,
+) -> Resp {
     let (tx, body) = Body::channel(64);
     tokio::spawn(async move {
         while let Some(ev) = events.recv().await {

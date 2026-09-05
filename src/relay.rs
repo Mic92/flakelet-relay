@@ -2,6 +2,7 @@ pub mod agent_conn;
 pub mod api;
 pub mod config;
 pub mod login;
+pub(crate) mod pages;
 pub mod server;
 pub mod session;
 pub mod state;

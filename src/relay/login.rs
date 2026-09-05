@@ -69,7 +69,7 @@ pub async fn start(relay: &Relay, req: &Request<Incoming>) -> Resp {
         .issuers
         .configs()
         .iter()
-        .filter(|(n, _)| wanted.is_none_or(|w| w == n.as_str()))
+        .filter(|(n, _)| wanted.as_deref().is_none_or(|w| w == n.as_str()))
         .find_map(|(n, c)| Some((n, c, c.login.as_ref()?)))
     else {
         return fail(StatusCode::NOT_FOUND, "no issuer has login configured");
@@ -116,16 +116,16 @@ pub async fn callback(relay: &Relay, req: &Request<Incoming>) -> Resp {
     let Some(st) = cookie(req, LOGIN).and_then(|c| relay.signer.open::<LoginState>(c)) else {
         return fail(StatusCode::BAD_REQUEST, "login expired, start over");
     };
-    if query(req, "state") != Some(&st.state) {
+    if query(req, "state").as_deref() != Some(st.state.as_str()) {
         return fail(StatusCode::BAD_REQUEST, "state mismatch");
     }
     let Some(code) = query(req, "code") else {
         return fail(
             StatusCode::UNAUTHORIZED,
-            query(req, "error").unwrap_or("no code"),
+            &query(req, "error").unwrap_or_else(|| "no code".into()),
         );
     };
-    let identity = match exchange(relay, req, &st, code).await {
+    let identity = match exchange(relay, req, &st, &code).await {
         Ok(i) => i,
         Err(e) => {
             tracing::info!(issuer = st.issuer, "login failed: {e}");

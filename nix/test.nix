@@ -177,6 +177,8 @@ in
             login.clientSecretFile = pkgs.writeText "secret" "s3cret";
           };
           agents.agent = [ "x509:dns:agent" ];
+          # Never connects; the dashboard lists it as disconnected.
+          agents.ghost = [ "x509:dns:ghost" ];
           groups.all = [ "agent" ];
           rules = {
             ci = {
@@ -466,8 +468,8 @@ in
         ev = client.succeed(f"{curl} -N --max-time 10 https://relay:7443/ui/jobs/hist1/events || true")
         assert "event: result" in ev and "hx-partial" in ev, ev
         # Deploy from the UI needs the htmx header, then redirects to the job page.
-        client.succeed(f"{curl} -o /dev/null -w '%{{http_code}}' -X POST 'https://relay:7443/ui/deploy?flakelet=other' | grep -q 403")
-        hdr = client.succeed(f"{curl} -D - -o /dev/null -H 'HX-Request: true' -X POST 'https://relay:7443/ui/deploy?flakelet=other'")
+        client.succeed(f"{curl} -o /dev/null -w '%{{http_code}}' -X POST 'https://relay:7443/ui/deploy?arg=other' | grep -q 403")
+        hdr = client.succeed(f"{curl} -D - -o /dev/null -H 'HX-Request: true' -X POST 'https://relay:7443/ui/deploy?arg=other'")
         loc = next(l.split(":", 1)[1].strip() for l in hdr.splitlines() if l.lower().startswith("hx-redirect:"))
         assert loc.startswith("/ui/jobs/"), hdr
         ev = client.succeed(f"{curl} -N --max-time 30 https://relay:7443{loc}/events || true")
@@ -475,6 +477,19 @@ in
         page = client.succeed(f"{curl} https://relay:7443{loc}")
         assert "agent/other" in page and "unchanged" in page and "hx-sse:connect" in page, page
         client.succeed(f"{curl} -sf -o /dev/null https://relay:7443/ui/static/htmx.min.js")
+        # Filter, flakelet detail, retry action, hosts incl. configured but absent ones.
+        out = client.succeed(f"{curl} 'https://relay:7443/ui/?q=status%3Ahealthy+oth'")
+        assert ">other<" in out and 'href="/ui/flakelets/app"' not in out, out
+        out = client.succeed(f"{curl} https://relay:7443/ui/flakelets/other")
+        assert ">agent<" in out and "History" in out and loc.split("/")[-1][:8] in out, out
+        out = client.succeed(f"{curl} 'https://relay:7443/ui/hosts?q=status%3Adisconnected'")
+        assert ">ghost<" in out and "disconnected" in out and ">agent<" not in out, out
+        # Nothing failed in that deploy, so there is nothing to retry.
+        client.succeed(f"{curl} -o /dev/null -w '%{{http_code}}' -H 'HX-Request: true' -X POST 'https://relay:7443/ui/retry?arg={loc.split('/')[-1]}' | grep -q 400")
+        # Live list updates: a job elsewhere re-renders the page body over SSE.
+        client.succeed(f"{curl} -N --max-time 15 'https://relay:7443/ui/events?path=jobs' > /tmp/ev.out 2>&1 &")
+        client.succeed(f"{admin} deploy --id live1 agent/other")
+        client.wait_until_succeeds("grep -q live1 /tmp/ev.out", timeout=20)
         client.succeed(f"{curl} -X POST -o /dev/null https://relay:7443/ui/logout")
         client.succeed(f"{curl} -o /dev/null -w '%{{http_code}}' https://relay:7443/ui/ | grep -q 303")
   '';
