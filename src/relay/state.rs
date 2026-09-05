@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 use crate::auth::issuers::Issuers;
 use crate::proto::{AgentInfo, Frame, JobRef, JobState, JobSummary, JobTarget};
@@ -53,6 +53,8 @@ pub struct Relay {
     pub cfg: Config,
     pub issuers: Issuers,
     pub signer: Signer,
+    /// Ticks whenever what the dashboard shows may have changed.
+    pub changed: broadcast::Sender<()>,
     agents: Mutex<HashMap<String, Agent>>,
     /// (host, agent job id) → subscriber. Lives here rather than on the
     /// connection so a reconnecting agent's late `done` still arrives.
@@ -67,6 +69,7 @@ impl Relay {
             cfg,
             issuers,
             signer: Signer::default(),
+            changed: broadcast::channel(16).0,
             agents: Mutex::default(),
             subs: Mutex::default(),
             next_conn: AtomicU64::new(0),
@@ -89,6 +92,7 @@ impl Relay {
             tracing::warn!(host, "replacing silent agent connection");
         }
         agents.insert(host.to_owned(), agent);
+        let _ = self.changed.send(());
         true
     }
 
@@ -96,6 +100,7 @@ impl Relay {
         let mut agents = self.agents.lock().expect("poisoned");
         if agents.get(host).is_some_and(|a| a.conn == conn) {
             agents.remove(host);
+            let _ = self.changed.send(());
         }
     }
 
@@ -125,6 +130,20 @@ impl Relay {
             }
         }
         a.jobs.insert(job.id.clone(), job);
+        let _ = self.changed.send(());
+    }
+
+    /// Hosts with an `agents` entry that `principals` may see but that
+    /// are not connected.
+    pub fn missing_hosts(&self, principals: &[String]) -> Vec<String> {
+        let agents = self.agents.lock().expect("poisoned");
+        self.cfg
+            .policy
+            .agents
+            .keys()
+            .filter(|h| !agents.contains_key(*h) && self.cfg.policy.sees_host(principals, h))
+            .cloned()
+            .collect()
     }
 
     /// Connected agents reduced to the flakelets `principals` may read.
