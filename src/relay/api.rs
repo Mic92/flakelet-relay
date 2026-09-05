@@ -13,8 +13,8 @@ use crate::proto::{
     AgentsResponse, ApiError, DeployRequest, DoneBody, Event, Frame, JobsResponse, RelayInfo,
     Status, Target, TargetStatus, job_id,
 };
-use crate::relay::agent_conn;
 use crate::relay::state::{Outgoing, Relay, Sub};
+use crate::relay::{agent_conn, ui};
 use crate::{proto, sse};
 
 /// `peer` are the principals proven by the transport (client cert SANs).
@@ -29,6 +29,12 @@ pub async fn handle(relay: Arc<Relay>, peer: Vec<String>, req: Request<Incoming>
         }
         (&Method::GET, "/metrics") => Ok(http::text(StatusCode::OK, relay.metrics())),
         (&Method::GET, "/health") => Ok(http::text(StatusCode::OK, String::from("ok\n"))),
+        (_, p) if p.starts_with("/ui/") => Ok(ui::handle(relay, req).await),
+        (&Method::GET, "/" | "/ui") => Ok(Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header(hyper::header::LOCATION, "/ui/")
+            .body(Body::empty())
+            .expect("static headers")),
         _ => Err(http::error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -38,13 +44,17 @@ pub async fn handle(relay: Arc<Relay>, peer: Vec<String>, req: Request<Incoming>
     r.unwrap_or_else(|e| e)
 }
 
-/// Transport principals plus those from a bearer token. Empty is 401.
+/// Transport principals plus those from a bearer token or dashboard
+/// session. Empty is 401.
 pub async fn authenticate(
     relay: &Relay,
     mut principals: Vec<String>,
     req: &Request<Incoming>,
 ) -> Result<Vec<String>, Resp> {
     let mut reason = String::from("no credentials");
+    if let Some(s) = ui::current(relay, req) {
+        principals.extend(s.principals);
+    }
     if let Some(tok) = http::bearer(req) {
         match relay.issuers.authenticate(tok).await {
             Ok(p) => principals.extend(p),

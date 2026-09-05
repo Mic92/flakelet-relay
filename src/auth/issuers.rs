@@ -19,6 +19,25 @@ pub struct IssuerConfig {
     pub audience: String,
     #[serde(default)]
     pub principal_claims: Vec<String>,
+    /// OAuth client for browser login to the dashboard. Its id is
+    /// accepted as a second audience.
+    #[serde(default)]
+    pub login: Option<Login>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Login {
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret_file: Option<PathBuf>,
+}
+
+/// Who a verified token speaks for.
+pub struct Identity {
+    pub principals: Vec<String>,
+    /// `preferred_username`, `email` or `sub`, for display only.
+    pub name: String,
 }
 
 const REFRESH: Duration = Duration::from_mins(10);
@@ -136,9 +155,21 @@ impl Issuers {
         Some(c.jwks.clone())
     }
 
+    pub fn configs(&self) -> &BTreeMap<String, IssuerConfig> {
+        &self.configs
+    }
+
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
     /// Principals from the first issuer matching the token's `iss` that
     /// verifies it, else the reason.
     pub async fn authenticate(&self, token: &str) -> Result<Vec<String>, String> {
+        self.identify(token).await.map(|i| i.principals)
+    }
+
+    pub async fn identify(&self, token: &str) -> Result<Identity, String> {
         let iss = unverified_iss(token).ok_or("malformed token")?;
         let mut last = String::from("unknown issuer");
         for (name, cfg) in &self.configs {
@@ -149,8 +180,24 @@ impl Issuers {
                 last = "no keys".into();
                 continue;
             };
-            match jwt::verify(token, &jwks, &cfg.url, &cfg.audience, SystemTime::now()) {
-                Ok(claims) => return Ok(jwt::principals(name, &claims, &cfg.principal_claims)),
+            let mut auds = vec![cfg.audience.as_str()];
+            auds.extend(cfg.login.as_ref().map(|l| l.client_id.as_str()));
+            match jwt::verify(token, &jwks, &cfg.url, &auds, SystemTime::now()) {
+                Ok(claims) => {
+                    let name_of = |k: &str| {
+                        claims
+                            .extra
+                            .get(k)
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                    };
+                    return Ok(Identity {
+                        principals: jwt::principals(name, &claims, &cfg.principal_claims),
+                        name: name_of("preferred_username")
+                            .or_else(|| name_of("email"))
+                            .unwrap_or_else(|| claims.sub.clone()),
+                    });
+                }
                 Err(jwt::Error::Issuer) => {}
                 Err(e) => last = e.to_string(),
             }
