@@ -48,6 +48,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         cfg.flakelets.clone(),
         cfg.flakelet_command.clone(),
         cli.state_dir.join("jobs"),
+        cfg.retention.clone(),
     );
     let fixed: Vec<Url> = cfg
         .relays
@@ -65,7 +66,6 @@ async fn run(cli: Cli) -> Result<(), String> {
                 client: client.clone(),
                 token_command: cfg.token_command.clone(),
                 jobs: jobs.clone(),
-                flakelets: cfg.flakelets.clone(),
                 connected: connected.clone(),
             };
             tokio::spawn(conn.run())

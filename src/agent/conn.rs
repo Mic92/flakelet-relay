@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 use crate::agent::jobs::Jobs;
 use crate::client::{Client, Url, token_command};
 use crate::http::Body;
-use crate::proto::{self, Frame, Named};
+use crate::proto::{self, Frame};
 use crate::ws::{self, Message, Role};
 
 /// Connection count published as systemd status text.
@@ -47,7 +47,6 @@ pub struct Conn {
     pub client: Arc<Client>,
     pub token_command: Option<Vec<String>>,
     pub jobs: Arc<Jobs>,
-    pub flakelets: Vec<String>,
     /// Established relay connections, for `STATUS=`.
     pub connected: Arc<Connected>,
 }
@@ -124,11 +123,7 @@ impl Conn {
             .send(&Frame::Hello {
                 version: proto::VERSION.into(),
                 capabilities: Vec::new(),
-                flakelets: self
-                    .flakelets
-                    .iter()
-                    .map(|f| Named { name: f.clone() })
-                    .collect(),
+                flakelets: self.jobs.describe().await,
                 jobs: self.jobs.refs(),
             })
             .await
@@ -186,10 +181,12 @@ impl Conn {
                 id,
                 flakelet,
                 rule,
+                caller,
+                client_id,
                 options: _,
             }) => {
-                tracing::info!(id, flakelet, rule, relay, "start");
-                for f in self.jobs.start(&id, &flakelet) {
+                tracing::info!(id, flakelet, rule, relay, ?caller, "start");
+                for f in self.jobs.start(&id, &flakelet, caller, client_id) {
                     writer.send(&f).await?;
                 }
             }

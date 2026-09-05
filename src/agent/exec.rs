@@ -14,13 +14,15 @@ use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use crate::proto::{DoneBody, Line, Status};
+use crate::proto::{DoneBody, Line, Named, Status};
 
 #[derive(Debug, Deserialize, Default)]
 struct FlakeletStatus {
     name: String,
     #[serde(default)]
     generation: Option<u64>,
+    #[serde(default)]
+    locked_url: Option<String>,
     #[serde(default)]
     held: Option<String>,
     #[serde(default)]
@@ -37,6 +39,16 @@ struct UnitState {
 pub struct Run {
     pub cursor: Option<String>,
     pub before: Option<u64>,
+}
+
+/// What `hello` advertises for `name`.
+pub async fn describe(flakelet_cmd: &Path, name: &str) -> Named {
+    let s = status(flakelet_cmd, name).await.unwrap_or_default();
+    Named {
+        name: name.to_owned(),
+        generation: s.generation,
+        revision: s.locked_url,
+    }
 }
 
 async fn status(flakelet_cmd: &Path, name: &str) -> Option<FlakeletStatus> {
@@ -186,6 +198,7 @@ pub async fn finish(
 
     let after = status(flakelet_cmd, flakelet).await;
     let generation = after.as_ref().and_then(|s| s.generation);
+    let revision = after.as_ref().and_then(|s| s.locked_url.clone());
     let status = if unit_ok {
         if generation == run.before {
             Status::Unchanged
@@ -208,6 +221,7 @@ pub async fn finish(
     DoneBody {
         status,
         generation,
+        revision,
         tail,
     }
 }

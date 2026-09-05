@@ -92,19 +92,22 @@ where
         return;
     }
     let hello = tokio::time::timeout(Duration::from_secs(10), reader.read()).await;
-    let info = match hello {
+    let (info, jobs) = match hello {
         Ok(Ok(Message::Text(t))) => match serde_json::from_str(&t) {
             Ok(Frame::Hello {
                 version,
                 capabilities,
                 flakelets,
-                jobs: _,
-            }) => AgentInfo {
-                host: host.clone(),
-                version,
-                capabilities,
-                flakelets,
-            },
+                jobs,
+            }) => (
+                AgentInfo {
+                    host: host.clone(),
+                    version,
+                    capabilities,
+                    flakelets,
+                },
+                jobs.into_iter().map(|j| (j.id.clone(), j)).collect(),
+            ),
             _ => return tracing::warn!(host, "first frame was not hello"),
         },
         _ => return tracing::warn!(host, "no hello within 10s"),
@@ -115,6 +118,7 @@ where
     let agent = Agent {
         conn,
         info: info.clone(),
+        jobs,
         tx: tx.clone(),
         last_seen: Instant::now(),
     };
@@ -175,6 +179,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     continue;
                 };
                 match &frame {
+                    Frame::Job { job } => relay.record_job(host, conn, job.clone()),
                     Frame::Ack { id, .. }
                     | Frame::Log { id, .. }
                     | Frame::Progress { id }

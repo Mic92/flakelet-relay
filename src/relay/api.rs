@@ -10,8 +10,8 @@ use tokio::sync::mpsc;
 
 use crate::http::{self, Body, Resp};
 use crate::proto::{
-    AgentsResponse, ApiError, DeployRequest, DoneBody, Event, Frame, RelayInfo, Status, Target,
-    TargetStatus, job_id,
+    AgentsResponse, ApiError, DeployRequest, DoneBody, Event, Frame, JobsResponse, RelayInfo,
+    Status, Target, TargetStatus, job_id,
 };
 use crate::relay::agent_conn;
 use crate::relay::state::{Outgoing, Relay, Sub};
@@ -23,6 +23,7 @@ pub async fn handle(relay: Arc<Relay>, peer: Vec<String>, req: Request<Incoming>
         (&Method::GET, "/v1/agent") => agent_conn::upgrade(relay, peer, req).await,
         (&Method::POST, "/v1/deploy") => deploy(relay, peer, req).await,
         (&Method::GET, "/v1/agents") => agents(&relay, peer, &req).await,
+        (&Method::GET, "/v1/jobs") => job_list(&relay, peer, &req).await,
         (&Method::GET, p) if p.starts_with("/v1/jobs/") => {
             jobs(relay.clone(), peer, &req, &p["/v1/jobs/".len()..]).await
         }
@@ -78,6 +79,12 @@ async fn agents(relay: &Relay, peer: Vec<String>, req: &Request<Incoming>) -> Re
         })
         .collect();
     Ok(http::json(StatusCode::OK, &AgentsResponse { agents }))
+}
+
+async fn job_list(relay: &Relay, peer: Vec<String>, req: &Request<Incoming>) -> Result<Resp, Resp> {
+    let principals = authenticate(relay, peer, req).await?;
+    let jobs = relay.job_summaries(&principals);
+    Ok(http::json(StatusCode::OK, &JobsResponse { jobs }))
 }
 
 #[derive(Clone)]
@@ -219,7 +226,7 @@ async fn deploy(
     let job = job_id(&caller, &dr.id);
     tracing::info!(job, caller, targets = ?waves.iter().flatten().map(|p| &p.target).collect::<Vec<_>>(), "deploy accepted");
     let (tx, body) = Body::channel(64);
-    tokio::spawn(run_job(relay, job, waves, tx));
+    tokio::spawn(run_job(relay, job, caller, dr.id, waves, tx));
     Ok(sse_response(body))
 }
 
@@ -256,7 +263,14 @@ async fn emit(tx: &Out, ev: &Event) -> bool {
     tx.send(Bytes::from(sse::encode(ev))).await.is_ok()
 }
 
-async fn run_job(relay: Arc<Relay>, job: String, waves: Vec<Vec<Planned>>, tx: Out) {
+async fn run_job(
+    relay: Arc<Relay>,
+    job: String,
+    caller: String,
+    client_id: String,
+    waves: Vec<Vec<Planned>>,
+    tx: Out,
+) {
     let all: Vec<Planned> = waves.iter().flatten().cloned().collect();
     if !emit(&tx, &accepted_event(&relay, &job, &all)).await {
         return;
@@ -276,6 +290,8 @@ async fn run_job(relay: Arc<Relay>, job: String, waves: Vec<Vec<Planned>>, tx: O
             id,
             flakelet: p.flakelet.clone(),
             rule: p.rule.clone(),
+            caller: Some(caller.clone()),
+            client_id: Some(client_id.clone()),
             options: BTreeMap::default(),
         })
         .await;

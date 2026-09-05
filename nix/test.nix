@@ -336,7 +336,7 @@ in
         agent.succeed("systemctl show app.service -p Description | grep -q 'app v1'")
 
     with subtest("detach returns once the job is accepted"):
-        set_app("${appSlow}")
+        set_app("${appSlow2}")
         out = client.succeed(f"timeout 20 {admin} deploy --detach agent/app 2>&1")
         assert "detached" in out and "agent/app:" not in out, out
         # The update still runs to completion on the agent.
@@ -353,10 +353,10 @@ in
         agent.succeed("systemctl start flakelet-agent")
         client.wait_until_succeeds("grep -q 'agent/other: unchanged' /tmp/retry.out", timeout=60)
         out = client.succeed(f"{admin} agents")
-        assert "agent\t" in out and "app,other" in out, out
+        assert "agent\t" in out and "app@" in out and ",other@1" in out, out
         tok = token("repo:github:example/app:ref:refs/heads/main")
         out = client.succeed(f"FLAKELET_RELAY_TOKEN_COMMAND='echo {tok}' push --relay https://relay:7443 agents")
-        assert out.strip().endswith("\tapp"), out
+        assert "\tapp@" in out and "other" not in out, out
 
     with subtest("certificate not listed under agents cannot connect as agent"):
         out = client.succeed(
@@ -414,5 +414,18 @@ in
         assert "resuming job" in out, out
         assert out.count("app: updated to generation") == 1, out
         assert "agent/app: updated" in out, out
+
+    with subtest("job history comes from the agents and survives a relay restart"):
+        out = client.succeed(f"{admin} deploy --id hist1 agent/other 2>&1")
+        relay.succeed("systemctl restart flakelet-relay")
+        relay.wait_until_succeeds("curl -sf http://127.0.0.1:7400/metrics | grep -q 'agent_up{host=\"agent\"} 1'")
+        out = client.succeed(f"{admin} jobs")
+        print(out)
+        line = next(l for l in out.splitlines() if "\thist1\t" in l)
+        assert "x509:" in line and "agent/other:unchanged" in line, line
+        # A caller only sees jobs on targets its rules cover.
+        tok = token("repo:github:example/app:ref:refs/heads/main")
+        out = client.succeed(f"FLAKELET_RELAY_TOKEN_COMMAND='echo {tok}' push --relay https://relay:7443 jobs")
+        assert "agent/app:" in out and "agent/other" not in out, out
   '';
 }
