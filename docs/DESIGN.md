@@ -1,149 +1,185 @@
 # flakelet-relay
 
-CI tells hosts behind firewalls to run `flakelet update <name>` now and
-gets the log and result back. Hosts dial out to one or more stateless
-relays. CI talks to whichever relay answers.
+flakelet-relay lets CI trigger `flakelet update` on hosts it cannot
+reach, and returns the log and result.
+
+## Problem
+
+flakelet hosts update themselves on a timer. This is robust but slow:
+after CI has built a new revision it can take a full timer interval to
+go live, and CI never learns whether it worked. CI cannot connect to
+the hosts to speed this up because they sit behind NAT and firewalls.
+
+## Solution
+
+Hosts dial out. Each runs `flakelet-agent`, which keeps a WebSocket
+open to one or more `flakelet-relay`s. CI runs `flakelet-push`, which
+asks any relay to have a host run `flakelet update <name>` and streams
+the output back.
 
 ```
-CI ──HTTPS──▶ relay A ◀──WSS── agent (eliza)
-   └────────▶ relay B ◀──WSS── agent (jamie)
+CI ──HTTPS──▶ relay A ◀──WSS── agent (web1)
+   └────────▶ relay B ◀──WSS── agent (web2)
 ```
 
-- **flakelet-relay**: authenticates both sides, applies policy, forwards.
-  State is config, RAM and a JWKS cache file.
-- **flakelet-agent**: holds one WebSocket per configured relay, runs
-  updates for an allowlist of local flakelets and keeps a job table on
-  disk.
-- **flakelet-push**: CLI for CI. Posts a deploy, follows the stream,
-  retries and fails over between relays.
+- **flakelet-relay** authenticates both sides, applies policy and
+  forwards. Its only state is config, memory and a JWKS cache file, so
+  several can run side by side and any one can be lost.
+- **flakelet-agent** runs updates for an allowlist of local flakelets
+  and keeps a job table on disk. It is the source of truth for what
+  happened.
+- **flakelet-push** posts a deploy, follows the stream, and retries or
+  fails over between relays.
 
-flakelet's `autoUpdate` timer stays enabled on hosts. With all relays
-down updates are late, not lost.
+The `autoUpdate` timer stays enabled. If every relay is down, updates
+are late, not lost.
 
-Out of scope: switching NixOS systems, shipping closures or pinning
-revisions, arbitrary commands, macOS, queuing for offline agents.
+Non-goals: switching NixOS systems, shipping closures, pinning
+revisions, running arbitrary commands, macOS, queuing work for offline
+agents.
 
 ## Trust model
 
-An agent does whatever a relay tells it, limited to `flakelet update` on
-its allowlist. A stolen relay key therefore can make hosts update early
-from their already configured flake ref, nothing more. Keeping it that
-way is why revisions and store paths are out of scope. Those would need
-the agent to verify the client credential itself.
+An agent does what a relay tells it. The only instruction that exists
+is "run `flakelet update` for a flakelet on your allowlist". A stolen
+relay key therefore lets an attacker make hosts update early from the
+flake ref they already trust, and nothing else.
+
+This is the reason revisions and store paths are non-goals. If a relay
+could say what to deploy, the agent would have to verify the CI
+credential end to end, and the relay could no longer be a simple
+forwarder.
 
 ## Identity
 
-A connection yields a set of principals. A rule matches if any does.
+Authentication reduces every connection to a set of principal strings. A policy
+rule matches if any principal matches.
 
-- An OIDC bearer token gives `oidc:<issuer>:<sub>` and
-  `oidc:<issuer>:<claim>:<value>` for each configured `principalClaims`
-  entry, one per element for list claims. Authelia's `sub` is a UUID, so
-  match on `email` or `groups` there. Tokens are bearer credentials for
-  their whole lifetime, so keep CI tokens short. JWKS is cached on disk and used stale up to 24 h because nixbot
-  is both issuer and deploy target.
-- A TLS client cert gives one per SAN: `x509:dns:eliza.r`,
-  `x509:email:joerg@thalheim.io`, `x509:uri:…`.
+- An OIDC bearer token yields `oidc:<issuer>:<sub>`, plus
+  `oidc:<issuer>:<claim>:<value>` for each claim listed in
+  `principalClaims` (one per element for list claims).
+- A TLS client certificate yields one principal per SAN:
+  `x509:dns:web1.internal`, `x509:email:root@example.org`, `x509:uri:…`.
 
-No principal means 401. Agents without certs can use `tokenCommand`.
-`push login --issuer <url> --client-id <id>` does the OAuth2 device flow
-and caches the `id_token` (plus refresh token if granted) in
-`$XDG_STATE_HOME/flakelet-push/token.json`. Later calls without a cert or
-token command use it and refresh it when it is about to expire.
+No principal means 401.
+
+Bearer tokens are valid for their whole lifetime, so keep CI tokens
+short-lived. The relay caches JWKS on disk and will use a stale copy
+for a while, so an issuer outage does not stop deploys. Agents without
+certificates can use `tokenCommand`. Humans can run `push login`,
+which does the OAuth2 device flow and caches the token.
 
 ## Listeners and certificates
 
-- Client API: HTTP on localhost behind nginx :443 (ACME), bearer only.
-- Agent endpoint: rustls on :7443 with optional client auth. Server
-  cert and client CAs are configurable, step-ca on eve in this
-  deployment. `push` with a client cert uses this port too.
+The relay has two listeners:
 
-Clients verify the relay against `--ca-file` or WebPKI. Agents get
-step-ca ACME certs over `.r`, renewed by timer, reloaded on change.
+- **Client API**: plain HTTP on localhost behind a reverse proxy.
+  Bearer tokens only.
+- **Agent endpoint**: TLS with optional client certificates checked
+  against configured CAs. `push` with a client certificate uses this
+  one too.
+
+Clients verify the relay against `--ca-file` or the WebPKI roots. The
+agent reloads its own certificate when the file changes.
 
 ## Finding relays
 
-`push` and the agent take `--relay <url>` (repeatable) and/or
-`--relay-srv <domain>`, which resolves `_flakelet-relay._tcp.<domain>`
-into `https://<target>:<port>` entries ordered by priority and weight.
-`push` walks the union. The agent connects to all of it and re-resolves
-on TTL expiry, at most every 60 s, so adding a relay is a DNS change. Lookup
-failure keeps the last set. Lookups go through the system resolver
-(`res_query`), which works the same on glibc, musl and macOS. TLS is verified against the SRV target name,
-so DNS can only point at hosts with a cert from the pinned CA. Records
-live under `thalheim.io` to be resolvable from CI sandboxes.
+Both `push` and the agent accept `--relay <url>` (repeatable) and
+`--relay-srv <domain>`. The SRV form resolves
+`_flakelet-relay._tcp.<domain>` into `https://<target>:<port>` entries
+ordered by priority and weight.
+
+`push` tries them in order. The agent connects to all of them and
+re-resolves when the TTL expires, so adding a relay is a DNS change. A
+failed lookup keeps the previous set. TLS is verified against the SRV
+target name, which means DNS can only send agents to hosts holding a
+certificate from the pinned CA.
 
 ## Policy
 
+An example relay policy:
+
 ```nix
 services.flakelet-relay.settings = {
-  tls.clientCAs = [ ./step-ca-root.crt ];
-  issuers.nixbot = { url = "https://nixbot.thalheim.io"; audience = "flakelet-relay"; };
-  issuers.authelia = { url = "https://auth.thalheim.io"; audience = "flakelet-relay"; principalClaims = [ "email" "groups" ]; };
+  tls.clientCAs = [ ./ca.crt ];
+  issuers.ci  = { url = "https://ci.example.org"; audience = "flakelet-relay"; };
+  issuers.sso = { url = "https://auth.example.org"; audience = "flakelet-relay";
+                  principalClaims = [ "email" "groups" ]; login.clientId = "flakelet-relay"; };
 
   agents = {                       # host id → principals allowed to be it
-    eve   = [ "x509:dns:eve.r" ];
-    eliza = [ "x509:dns:eliza.r" ];
-    jamie = [ "x509:dns:jamie.r" ];
+    hub  = [ "x509:dns:hub.internal" ];
+    web1 = [ "x509:dns:web1.internal" ];
+    web2 = [ "x509:dns:web2.internal" ];
   };
-  groups.tum = [ "eliza" "jamie" ];
+  groups.web = [ "web1" "web2" ];
 
   rules = {                        # name → who may deploy which host/flakelet
-    tribuchet.principals = [ "oidc:nixbot:repo:github:Mic92/tribuchet:ref:refs/heads/main" ];
-    tribuchet.targets    = [ "eve/tribuchet-hub" "@tum/tribuchet-worker" ];
-    doctor.principals    = [ "oidc:nixbot:repo:github:TUM-DSE/doctor-cluster-config:ref:refs/heads/master" ];
-    doctor.targets       = [ "@tum/*" ];
-    nixbot.principals    = [ "oidc:nixbot:repo:github:Mic92/nixbot:ref:refs/heads/main" ];
-    nixbot.targets       = [ "*/nixbot" ];
-    admin.principals     = [ "x509:email:joerg@thalheim.io" "oidc:authelia:groups:admin" ];
-    admin.targets        = [ "*/*" ];
+    app.principals   = [ "oidc:ci:repo:github:example/app:ref:refs/heads/main" ];
+    app.targets      = [ "hub/app-hub" "@web/app-worker" ];
+    infra.principals = [ "oidc:ci:repo:github:example/infra:ref:refs/heads/main" ];
+    infra.targets    = [ "@web/*" ];
+    admin.principals = [ "x509:email:root@example.org" "oidc:sso:groups:admin" ];
+    admin.targets    = [ "*/*" ];
   };
 };
 ```
 
-Globs, allow-only, unordered. Rule names label logs and metrics.
+Rules are allow-only, unordered and use globs. Rule names show up in
+logs and metrics. They are applied in three places:
 
-- Deploy: all requested targets covered or 403 with the uncovered ones.
-- Read (`/v1/jobs`, `/v1/agents`): same check per target. Logs may
-  contain whatever the service printed.
-- Agent: the host id is the single `agents.<host>` entry the principals
-  match. The agent never names itself. An existing connection for that
-  host is kept if it was heard from in the last 45 s (agents ping every
-  20 s) and the newcomer gets 409.
+- **Deploy**: every requested target must be covered, else 403 listing
+  the uncovered ones.
+- **Read** (`/v1/jobs`, `/v1/agents`, dashboard): the same check per
+  target. Logs contain whatever the service printed, so read access is
+  worth restricting.
+- **Agent**: the host id is the single `agents.<host>` entry the
+  connection's principals match. The agent never names itself. If a
+  live connection for that host already exists, the newcomer gets 409.
+
+On top of this the agent has its own `flakelets` allowlist, which is
+also what it advertises in `hello`.
 
 `flakelet-relay check-policy <config> <principal>... -- <target>...`
-for offline assertions. The agent's local `flakelets` allowlist applies
-on top and is what `hello` advertises.
+evaluates the rules offline. The NixOS module runs it at build time for
+`policyChecks`, so a policy mistake fails the build rather than a
+deploy.
 
 ## Wire format rules
 
-For HTTP bodies, SSE events and WebSocket frames:
+These rules apply to HTTP bodies, SSE events and WebSocket frames. Their
+purpose is to let the protocol grow without version bumps.
 
-- List elements are objects (`{"target": …}`, `{"line": …}`), never bare
-  values, so fields can be added anywhere.
+- List elements are always objects (`{"target": …}`, `{"line": …}`),
+  never bare values, so a field can be added anywhere.
 - Unknown fields and message types are ignored. Fields are added, never
-  redefined. Enum strings map unknown values to the safe side.
-- WS frames are `{"type": …}`, SSE uses `event:` with JSON `data:`, HTTP
-  errors are `{"code", "message", …}`.
+  redefined. Unknown enum values map to the safe side.
+- WS frames are `{"type": …}`. SSE uses `event:` with JSON `data:`.
+  HTTP errors are `{"code", "message", …}`.
 - `hello`, `welcome` and `accepted` carry `capabilities`. Features are
-  negotiated by name and `version` is informational. `/v1/` bumps only
-  for what capabilities cannot express.
+  negotiated by name and `version` is informational. `/v1/` only bumps
+  for something capabilities cannot express.
 
 ## HTTP API
 
-`POST /v1/deploy` answers with SSE. Request:
+### POST /v1/deploy
+
+The request names a client-chosen id and one or more waves of targets:
 
 ```json
 {"id": "<client uuid>",
  "waves": [
-   {"targets": [{"target": "eliza/tribuchet-worker"}]},
-   {"targets": [{"target": "jamie/tribuchet-worker"}, {"target": "eve/tribuchet-hub"}]}
+   {"targets": [{"target": "web1/app-worker"}]},
+   {"targets": [{"target": "web2/app-worker"}, {"target": "hub/app-hub"}]}
  ],
  "options": {}}
 ```
 
 Targets within a wave run in parallel. The next wave starts only if
-every target of the previous one ended `updated` or `unchanged`. `push`
-accepts plain targets and `--wave` separators. Events:
+every target in the previous one ended `updated` or `unchanged`. On the
+command line this is `push deploy web1/app-worker --wave web2/app-worker
+hub/app-hub`.
+
+The response is an SSE stream:
 
 ```
 accepted {job, relay: {name, version, capabilities}, agents: [{host, version, capabilities}]}
@@ -154,37 +190,52 @@ done     {target, status, generation?, tail?: [{line}]}
 result   {ok, targets: [{target, status}], skipped: [{target}]}
 ```
 
-`progress` comes every 30 s while a unit runs. `push` aborts after
-5 min of silence for a running target or 60 min total.
+`progress` arrives periodically while a unit runs, so a client can
+tell a slow update from a dead stream.
 
-The job id is `hash(caller identity, client id)`, so retries are
-idempotent and other callers cannot collide with or attach to it. Errors before the
-stream starts: `403 {"code": "target_denied", "targets": [...]}`,
-`404 {"code": "unknown_host", "targets": [...]}` for hosts the relay has
-no `agents` entry for,
-`503 {"code": "agent_unavailable", "targets": [...]}` when the agent is
-not connected right now (retried by `push` with backoff for 30 s, then
-next relay), `400 {"code": "unsupported_option", ...}`.
+Per-target status is `updated`, `unchanged`, `rolled-back` or `failed`.
+`unchanged` counts as success because the timer may have got there
+first. `ok` is true when every target is `updated` or `unchanged`.
+Targets in waves that never started are listed under `skipped`. There
+is no rollback across targets.
 
-`GET /v1/jobs/<client id>` re-derives the job id, sends `query` for it to
-every flakelet the caller may read and streams what the agents that know
-it have, as a single wave. 404 `unknown_job` if none does within 3 s.
-`push` goes there when its deploy stream breaks and skips lines it
-already printed.
+The job id is `hash(caller identity, client id)`. Retrying with the
+same id is idempotent, and another caller cannot collide with or attach
+to your job.
 
-`GET /v1/agents` returns
-`{"agents": [{host, version, capabilities, flakelets: [{name, running?, pending?, last?: {status, generation, at}}]}]}`
-filtered by read policy.
+Errors before the stream starts:
 
-Status per target: `updated`, `unchanged`, `rolled-back`, `failed`.
-`unchanged` counts as success since the timer may have been first. `ok`
-means all targets `updated` or `unchanged`. Targets in waves that never
-started are listed in `skipped`. There is no rollback across targets.
+| status | code | when |
+|---|---|---|
+| 403 | `target_denied` | a target is not covered by the caller's rules |
+| 404 | `unknown_host` | the relay has no `agents` entry for a host |
+| 503 | `agent_unavailable` | the agent is not connected right now. `push` retries with backoff, then moves to the next relay |
+| 400 | `unsupported_option` | an option needs a capability a targeted agent lacks |
+
+All carry `targets: [...]` naming the offending ones.
+
+### GET /v1/jobs/{client id}
+
+Re-derives the job id, sends `query` for it to every flakelet the
+caller may read, and streams whatever the agents that know it have, as
+a single wave. 404 `unknown_job` if none answers. This is where `push`
+goes when its deploy stream breaks. It skips lines it has already
+printed.
+
+### GET /v1/agents, GET /v1/jobs
+
+```
+{"agents": [{host, version, capabilities, flakelets: [{name, generation?, revision?}]}]}
+{"jobs":   [{id, caller, created, finished?, targets: [{target, state, status?, generation?}]}]}
+```
+
+Both are filtered by read policy. `jobs` groups the agents' job tables
+by caller and client id, newest first.
 
 ## Agent protocol
 
-WebSocket at `/v1/agent`, one JSON object with a `type` field per text
-frame, WS ping every 20 s.
+A WebSocket at `/v1/agent` carrying one JSON object per text frame,
+kept alive with WS pings:
 
 ```
 ← welcome  {host, relay: {name, version, capabilities}}
@@ -201,139 +252,97 @@ frame, WS ping every 20 s.
 ```
 
 `deploy.options` becomes `start.options`. An option is forwarded only
-if every targeted agent has the capability, else the request is 400.
+if every targeted agent advertises the capability, otherwise the deploy
+is rejected with 400.
 
-A `start` with a known id replays. When an agent reconnects the relay
-re-sends `start` for every target it still waits on, so lines logged
-while the link was down reach the client. The relay drops lines whose
-`seq` it already forwarded. Concurrent `start`s for one flakelet
-are coalesced: new ids attach to a single follow-up run and receive the
-output of the first run that began after they arrived. Logs are capped
-at 1 MiB per job at the agent.
+Three mechanisms keep the stream intact across disconnects and
+concurrent callers:
+
+- **Replay.** A `start` with an id the agent already knows replays
+  that job's ack, log and result instead of running again.
+- **Re-send on reconnect.** When an agent reconnects, the relay
+  re-sends `start` for every target it is still waiting on. Combined
+  with replay, lines logged while the link was down still reach the
+  client. The relay drops lines whose `seq` it has already forwarded.
+- **Coalescing.** Concurrent `start`s for one flakelet do not queue up.
+  New ids attach to a single follow-up run and receive the output of
+  the first run that begins after they arrived.
+
+Logs are capped per job at the agent.
 
 ## Agent execution
 
-`flakelet update` runs as transient unit
-`flakelet-relay-job-<flakelet>.service` logging to the journal. It
-serialises with the timer via flakelet's per-service flock, outlives
-agent restarts (the agent may be what is updated), and the agent
-follows its journal from a saved cursor whether live or reattached.
+The agent does not run `flakelet update` as a child process. It starts
+a transient unit, `flakelet-relay-job-<flakelet>.service`, and follows
+its journal from a saved cursor. There are three reasons:
 
-The job table is `$STATE_DIRECTORY/jobs/<id>.json` with flakelet,
-caller, client id, journal cursor, generation before, state, logs and
-result. Summaries are kept `keepJobsDays` (90), logs `keepLogsDays`
-(14), at most `maxJobs` (5000) entries; pruned at start and after each
-run. On start the agent resumes running entries by following the unit
-from the cursor until it is gone and starts pending ones. Results reach
-the relay through the replay triggered by its re-sent `start`.
+1. The update serialises with the timer through flakelet's per-service
+   lock.
+2. It survives an agent restart. The agent may be the service being
+   updated.
+3. Following a live job and reattaching after a restart are the same
+   code path.
 
-Relays persist nothing about jobs. `hello` carries the newest 50
-summaries per flakelet and every state change is sent as a `job` frame
-to all connected relays, so each relay can serve `GET /v1/jobs` (deploys
-grouped by caller and client id, filtered by the caller's read
-permission) and knows each flakelet's current generation and revision
-without having started the job itself.
+Each job is a file, `$STATE_DIRECTORY/jobs/<id>.json`, holding
+flakelet, caller, client id, journal cursor, generation before, state,
+logs and result. Retention is configurable and logs expire before
+summaries. On start the agent resumes running entries by following
+their unit until it is gone, and starts pending ones. The result
+reaches the relay through the replay that its re-sent `start` triggers.
 
-A failed unit is `failed`. Otherwise the result comes from generation
-and health in `flakelet status --json` before and after. `failed` and `rolled-back` carry
-the last 50 journal lines of the flakelet's units as `tail`.
+Relays store none of this, by design. `hello` carries recent job summaries per
+flakelet, and every state change goes out as a `job` frame to all
+connected relays. That is enough for any relay to answer `GET /v1/jobs`
+and to know each flakelet's current generation and revision, including
+for deploys that went through a different relay.
 
-`Type=notify`, ready after loading config and job table regardless of
-relay connectivity, so a relay outage cannot roll back an agent update.
-`STATUS=connected 1/2 relays; last: tribuchet-worker updated gen 7`.
+Deciding the result: a failed unit is `failed`. Otherwise the
+agent compares generation and health from `flakelet status --json`
+before and after. `failed` and `rolled-back` include the last journal
+lines of the flakelet's units as `tail`, so the caller can see the
+cause without shell access.
+
+The agent signals readiness once config and job table are loaded,
+regardless of relay connectivity. Otherwise a relay outage during an
+agent self-update would look like a failed start and get rolled back.
 
 ## Failure handling
 
 | failure | behaviour |
 |---|---|
 | relay down | `push` tries the next one |
-| relay dies mid-stream | `push` resumes via `GET /v1/jobs` on another relay |
-| relay restarted, agents not back yet | 503, `push` retries 30 s |
-| agent offline | 503, timer catches up |
+| relay dies mid-stream | `push` resumes via `GET /v1/jobs/<id>` on another relay |
+| relay restarted, agents not back yet | 503, `push` retries with backoff |
+| agent offline | 503, the timer catches up later |
 | agent restarts mid-job | unit keeps running, agent reattaches and reports |
 | same job via two relays | same id, agent dedups |
-| concurrent pushes, one flakelet | coalesced into current + one follow-up |
-| timer races a push | flakelet lock serialises, push may see `unchanged` |
-| update breaks connectivity | flakelet health check rolls the service back. `rolled-back` is reported on reconnect, else `push` hits the idle timeout |
-| target in wave 1 fails | later waves not started, listed as `skipped` |
-| issuer down | stale JWKS from disk |
-| two agents claim a host | incumbent kept if heard from recently, newcomer 409 |
+| concurrent pushes, one flakelet | coalesced into the current run plus one follow-up |
+| timer races a push | flakelet lock serialises them, push may see `unchanged` |
+| update breaks connectivity | flakelet's health check rolls the service back. `rolled-back` is reported on reconnect, or `push` hits its idle timeout |
+| target in wave 1 fails | later waves are not started and listed as `skipped` |
 
 ## Observability
 
-Job id is a tracing field on both sides. JSON logs under journald.
+The relay serves Prometheus text on `/metrics` (plain listener only),
+prefix `flakelet_relay_`:
 
-Relay `/metrics` (localhost):
-`agent_up{host}`, `agent_info{host,version,auth}`,
-`agent_connects_total{host,result}`, `agent_disconnects_total{host,reason}`,
-`deploys_total{rule,host,flakelet,status}` (status also `denied`,
-`unavailable`), `deploy_duration_seconds{host,flakelet}`,
-`auth_failures_total{mechanism,reason}`, `jwks_refresh_total{issuer,result}`,
-`jwks_age_seconds{issuer}`, `streams_open`. Prefix `flakelet_relay_`.
+| metric | labels | meaning |
+|---|---|---|
+| `agent_up` | host | 1 while a connection for that host is registered |
+| `agent_info` | host, version | constant 1, for version inventory |
+| `deploys_total` | rule, host, flakelet, status | finished targets, status as on the wire |
 
-Agent `/metrics` (localhost, optional):
-`relay_up{relay}`, `relay_reconnects_total{relay}`,
-`jobs_total{flakelet,status}`, `job_duration_seconds{flakelet}`,
-`job_running{flakelet}`, `job_pending{flakelet}`,
-`last_job_timestamp_seconds{flakelet,status}`,
-`flakelet_generation{flakelet}`, `flakelet_healthy{flakelet}`,
-`log_truncated_total{flakelet}`. Prefix `flakelet_agent_`.
-
-Optional alert rules in the NixOS module: agent down or without relays
-> 10 min, > 5 reconnects or any 409 in 15 min, deploy `failed` or
-`rolled-back`, JWKS age > 24 h.
-
-`flakelet-push agents` prints `/v1/agents` as a table.
+The agent reports connected relays and its last result through
+sd-notify `STATUS=`, visible in `systemctl status flakelet-agent`.
 
 ## Dashboard
 
-Served by the relay under `/ui/` on both listeners, so behind nginx it
-sits next to the client API. Server-rendered HTML (maud) and one static
-stylesheet, no script so far; `Content-Security-Policy` only allows
-same-origin styles and scripts.
-
-Login is OIDC authorization code flow with PKCE against one of the
-configured issuers (`issuers.<name>.login` with `clientId` and optional
-`clientSecretFile`; the client id is also accepted as token audience).
-`/ui/login` redirects with `state` and the PKCE verifier kept in a
-short-lived signed cookie, the redirect URI is `https://<Host>/ui/callback`.
-`/ui/callback` exchanges the code, verifies the `id_token` with the
-same JWKS and claim mapping as bearer tokens and sets a session cookie
-holding principals, display name and expiry, HMAC-signed with a
-per-process random key, `HttpOnly; Secure; SameSite=Lax`, valid 12 h.
-There is no server-side session store and a relay restart logs
-everyone out.
-
-A session is just another source of principals: the JSON API accepts
-the cookie too, and pages show exactly what `/v1/agents` and
-`/v1/jobs` would show that user.
-
-Pages: flakelets (one row per flakelet across connected hosts with
-per-host state, revision or drift, last deploy and an overall status),
-hosts (agent version and flakelets with generation) and jobs (recent
-deploys with caller and per-target result).
-
-## Implementation
-
-github.com/Mic92/flakelet-relay, CI on nixbot.
-
-Rust workspace with tribuchet-sized dependencies: tokio, rustls, hyper
-for HTTP/1.1 and the WS upgrade with hand-rolled framing and SSE, JWT
-verification for RS256/ES256/EdDSA on `ring`, serde. systemd is driven
-through `systemctl`, `busctl` and `journalctl --follow --cursor`.
-Crates are `proto`, `auth` (principals, JWKS, policy,
-`check-policy`), `relay`, `agent` and `push`. sd-notify and socket
-activation are shared with tribuchet. Common flags are `--cert/--key`,
-`--token-command` and `--ca-file`.
-
-Relay and agent ship as flakelets and update through themselves. The
-NixOS modules render their config and the cert renewal timer, so trust
-inputs change with the host. First install and relay-less periods fall
-to the `autoUpdate` timer. Policy is asserted at eval time with
-`check-policy`.
-
-NixOS container test with the real flakelet: two relays, an mTLS and an OIDC agent, minica, static mock
-issuer. Cases: deploy, unchanged, failing first wave, failover
-mid-stream, duplicate id, coalescing, agent restart mid-job, idle
-timeout, denied target, read filtering, foreign host, duplicate agent,
-claim principals, log cap, SRV add/remove.
+The relay serves a read-only HTML view of the same data under `/ui/`.
+Browser login is the OIDC authorization code flow with PKCE against any
+issuer that has `login.clientId` set, and that client id is also
+accepted as a token audience. The `id_token` goes through the same JWKS
+and claim mapping as a bearer token, and the resulting principals are
+kept in an HMAC-signed cookie. There is no server-side session store,
+so a relay restart logs everyone out. A session is just another source
+of principals: the JSON API accepts the cookie too, and the pages show
+exactly what `/v1/agents` and `/v1/jobs` would return to that user.
