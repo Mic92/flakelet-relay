@@ -130,6 +130,60 @@ let
   appSlow2 = artifact "app" "slow2" { startPre = "${pkgs.coreutils}/bin/sleep 6"; };
   otherV1 = artifact "other" "v1" { };
 
+  relayArtifact = flakelet.lib.buildArtifact pkgs {
+    name = "flakelet-relay";
+    module = self.flakelets.default;
+    settings = {
+      certFile = "${certs}/relay/cert.pem";
+      keyFile = "${certs}/relay/key.pem";
+      clientCAFiles = [ "${certs}/ca.pem" ];
+      settings = {
+        name = "relay";
+        listenTls = "[::]:7443";
+        listenHttp = "127.0.0.1:7400";
+        issuerCaFile = "${certs}/ca.pem";
+        issuers.mock = {
+          url = "https://relay:8443";
+          audience = "flakelet-relay";
+          principalClaims = [ "groups" ];
+          login.clientId = "dashboard";
+          login.clientSecretFile = "${pkgs.writeText "secret" "s3cret"}";
+        };
+        agents.agent = [ "x509:dns:agent" ];
+        # Never connects; the dashboard lists it as disconnected.
+        agents.ghost = [ "x509:dns:ghost" ];
+        groups.all = [ "agent" ];
+        rules = {
+          ci = {
+            principals = [ "oidc:mock:repo:github:example/app:ref:refs/heads/main" ];
+            targets = [ "agent/app" ];
+          };
+          admins = {
+            principals = [
+              "x509:email:admin@example.org"
+              "oidc:mock:groups:wheel"
+            ];
+            targets = [
+              "@all/*"
+              "*/*"
+            ];
+          };
+        };
+      };
+      policyChecks = [
+        {
+          principals = [ "oidc:mock:repo:github:example/app:ref:refs/heads/main" ];
+          targets = [ "agent/app" ];
+        }
+        {
+          principals = [ "oidc:mock:repo:github:example/app:ref:refs/heads/main" ];
+          targets = [ "agent/other" ];
+          allow = false;
+        }
+      ];
+    };
+  };
+
   pushWrapper = pkgs.writeShellScriptBin "push" ''
     exec ${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/flakelet-push \
       --ca-file ${certs}/ca.pem "$@"
@@ -138,107 +192,58 @@ in
 {
   name = "flakelet-relay";
 
-  containers.relay =
-    { config, ... }:
-    {
-      imports = [ self.nixosModules.relay ];
-      environment.systemPackages = [ pkgs.iproute2 ];
-      networking.firewall.allowedTCPPorts = [
-        7443
-        8443
-        53
-      ];
-      networking.firewall.allowedUDPPorts = [ 53 ];
-      # SRV discovery. dnsmasq also answers A/AAAA from /etc/hosts.
-      services.dnsmasq = {
-        enable = true;
-        resolveLocalQueries = false;
-        settings = {
-          srv-host = "_flakelet-relay._tcp.test,relay,7443";
-          no-resolv = true;
-        };
-      };
-      services.flakelet-relay = {
-        enable = true;
-        tls = {
-          certFile = "${certs}/relay/cert.pem";
-          keyFile = "${certs}/relay/key.pem";
-          clientCAFiles = [ "${certs}/ca.pem" ];
-        };
-        settings = {
-          listenTls = "[::]:7443";
-          listenHttp = "127.0.0.1:7400";
-          issuerCaFile = "${certs}/ca.pem";
-          issuers.mock = {
-            url = "https://relay:8443";
-            audience = "flakelet-relay";
-            principalClaims = [ "groups" ];
-            login.clientId = "dashboard";
-            login.clientSecretFile = pkgs.writeText "secret" "s3cret";
-          };
-          agents.agent = [ "x509:dns:agent" ];
-          # Never connects; the dashboard lists it as disconnected.
-          agents.ghost = [ "x509:dns:ghost" ];
-          groups.all = [ "agent" ];
-          rules = {
-            ci = {
-              principals = [ "oidc:mock:repo:github:example/app:ref:refs/heads/main" ];
-              targets = [ "agent/app" ];
-            };
-            admins = {
-              principals = [
-                "x509:email:admin@example.org"
-                "oidc:mock:groups:wheel"
-              ];
-              targets = [
-                "@all/*"
-                "*/*"
-              ];
-            };
-          };
-        };
-        policyChecks = [
-          {
-            principals = [ "oidc:mock:repo:github:example/app:ref:refs/heads/main" ];
-            targets = [ "agent/app" ];
-          }
-          {
-            principals = [ "oidc:mock:repo:github:example/app:ref:refs/heads/main" ];
-            targets = [ "agent/other" ];
-            allow = false;
-          }
-        ];
-      };
-      # mock issuer
-      services.nginx = {
-        enable = true;
-        virtualHosts.relay = {
-          listen = [
-            {
-              addr = "[::]";
-              port = 8443;
-              ssl = true;
-            }
-            {
-              addr = "0.0.0.0";
-              port = 8443;
-              ssl = true;
-            }
-          ];
-          onlySSL = true;
-          sslCertificate = "${certs}/relay/cert.pem";
-          sslCertificateKey = "${certs}/relay/key.pem";
-          root = "${issuer}/www";
-          locations."/authorize".proxyPass = "http://127.0.0.1:8089";
-          locations."/device".proxyPass = "http://127.0.0.1:8089";
-          locations."/token".proxyPass = "http://127.0.0.1:8089";
-        };
-      };
-      systemd.services.device-mock = {
-        wantedBy = [ "multi-user.target" ];
-        serviceConfig.ExecStart = deviceMock;
+  containers.relay = {
+    imports = [ flakelet.nixosModules.default ];
+    environment.systemPackages = [ pkgs.iproute2 ];
+    services.flakelets = {
+      enable = true;
+      services.flakelet-relay.prebuilt = relayArtifact;
+    };
+    networking.firewall.allowedTCPPorts = [
+      7443
+      8443
+      53
+    ];
+    networking.firewall.allowedUDPPorts = [ 53 ];
+    # SRV discovery. dnsmasq also answers A/AAAA from /etc/hosts.
+    services.dnsmasq = {
+      enable = true;
+      resolveLocalQueries = false;
+      settings = {
+        srv-host = "_flakelet-relay._tcp.test,relay,7443";
+        no-resolv = true;
       };
     };
+    # mock issuer
+    services.nginx = {
+      enable = true;
+      virtualHosts.relay = {
+        listen = [
+          {
+            addr = "[::]";
+            port = 8443;
+            ssl = true;
+          }
+          {
+            addr = "0.0.0.0";
+            port = 8443;
+            ssl = true;
+          }
+        ];
+        onlySSL = true;
+        sslCertificate = "${certs}/relay/cert.pem";
+        sslCertificateKey = "${certs}/relay/key.pem";
+        root = "${issuer}/www";
+        locations."/authorize".proxyPass = "http://127.0.0.1:8089";
+        locations."/device".proxyPass = "http://127.0.0.1:8089";
+        locations."/token".proxyPass = "http://127.0.0.1:8089";
+      };
+    };
+    systemd.services.device-mock = {
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig.ExecStart = deviceMock;
+    };
+  };
 
   containers.agent =
     { containers, ... }:

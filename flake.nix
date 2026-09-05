@@ -36,10 +36,9 @@
 
       formatter = forAllSystems (pkgs: (treefmtFor pkgs).config.build.wrapper);
 
-      nixosModules = {
-        relay = import ./nix/module-relay.nix self;
-        agent = import ./nix/module-agent.nix self;
-      };
+      flakelets.default = import ./nix/flakelet.nix;
+
+      nixosModules.agent = import ./nix/module-agent.nix self;
 
       checks = forAllSystems (
         pkgs:
