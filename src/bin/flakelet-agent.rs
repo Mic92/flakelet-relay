@@ -109,7 +109,7 @@ async fn run(cli: Cli) -> Result<(), String> {
     });
     // Ready means config loaded, not relay reached, so an agent updated
     // during a relay outage is not rolled back for it.
-    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
+    let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
     logging::shutdown_signal().await;
     Ok(())
 }

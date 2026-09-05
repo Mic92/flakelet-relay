@@ -73,7 +73,7 @@ async fn serve(path: PathBuf, cache_dir: Option<PathBuf>) -> Result<(), String> 
         let server_cfg = tls::server(&t.cert, &t.key, &t.client_cas).map_err(|e| e.to_string())?;
         tasks.spawn(server::run_tls(relay.clone(), addr, server_cfg));
     }
-    let _ = sd_notify::notify(false, &[sd_notify::NotifyState::Ready]);
+    let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
     tokio::select! {
         r = tasks.join_next() => match r {
             Some(Ok(Err(e))) => Err(e.to_string()),
