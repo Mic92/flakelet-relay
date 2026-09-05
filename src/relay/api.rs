@@ -14,7 +14,7 @@ use crate::proto::{
     Status, Target, TargetStatus, job_id,
 };
 use crate::relay::state::{Outgoing, Relay, Sub};
-use crate::relay::{agent_conn, ui};
+use crate::relay::{agent_conn, login, ui};
 use crate::{proto, sse};
 
 /// `peer` are the principals proven by the transport (client cert SANs).
@@ -52,7 +52,7 @@ pub async fn authenticate(
     req: &Request<Incoming>,
 ) -> Result<Vec<String>, Resp> {
     let mut reason = String::from("no credentials");
-    if let Some(s) = ui::current(relay, req) {
+    if let Some(s) = login::current(relay, req) {
         principals.extend(s.principals);
     }
     if let Some(tok) = http::bearer(req) {
@@ -78,16 +78,7 @@ pub async fn authenticate(
 
 async fn agents(relay: &Relay, peer: Vec<String>, req: &Request<Incoming>) -> Result<Resp, Resp> {
     let principals = authenticate(relay, peer, req).await?;
-    let policy = &relay.cfg.policy;
-    let agents = relay
-        .agent_infos()
-        .into_iter()
-        .filter_map(|mut a| {
-            a.flakelets
-                .retain(|f| policy.rule_for(&principals, &a.host, &f.name).is_some());
-            (!a.flakelets.is_empty()).then_some(a)
-        })
-        .collect();
+    let agents = relay.visible_agents(&principals);
     Ok(http::json(StatusCode::OK, &AgentsResponse { agents }))
 }
 
@@ -230,17 +221,37 @@ async fn deploy(
     let body = http::read_body(req.into_body(), 64 << 10).await?;
     let dr: DeployRequest = serde_json::from_slice(&body)
         .map_err(|e| http::error(StatusCode::BAD_REQUEST, "bad_request", e.to_string()))?;
-    let waves = plan(&relay, &principals, &dr).map_err(|(s, e)| http::json(s, &e))?;
+    let rx = start_deploy(relay, &principals, dr).map_err(|(s, e)| http::json(s, &e))?;
+    Ok(sse_response(rx, sse::encode))
+}
 
+/// Check policy and availability, then run the deploy in the
+/// background. The receiver yields its events. Dropping it does not
+/// stop targets that already started.
+pub fn start_deploy(
+    relay: Arc<Relay>,
+    principals: &[String],
+    dr: DeployRequest,
+) -> Result<mpsc::Receiver<Event>, (StatusCode, ApiError)> {
+    let waves = plan(&relay, principals, &dr)?;
     let caller = principals.join("\n");
     let job = job_id(&caller, &dr.id);
     tracing::info!(job, caller, targets = ?waves.iter().flatten().map(|p| &p.target).collect::<Vec<_>>(), "deploy accepted");
-    let (tx, body) = Body::channel(64);
+    let (tx, rx) = mpsc::channel(64);
     tokio::spawn(run_job(relay, job, caller, dr.id, waves, tx));
-    Ok(sse_response(body))
+    Ok(rx)
 }
 
-fn sse_response(body: Body) -> Resp {
+/// Stream `events` through `encode` as a `text/event-stream` body.
+pub fn sse_response(mut events: mpsc::Receiver<Event>, encode: fn(&Event) -> String) -> Resp {
+    let (tx, body) = Body::channel(64);
+    tokio::spawn(async move {
+        while let Some(ev) = events.recv().await {
+            if tx.send(Bytes::from(encode(&ev))).await.is_err() {
+                return;
+            }
+        }
+    });
     Response::builder()
         .status(StatusCode::OK)
         .header(hyper::header::CONTENT_TYPE, "text/event-stream")
@@ -267,10 +278,10 @@ fn accepted_event(relay: &Relay, job: &str, targets: &[Planned]) -> Event {
     }
 }
 
-type Out = mpsc::Sender<Bytes>;
+type Out = mpsc::Sender<Event>;
 
 async fn emit(tx: &Out, ev: &Event) -> bool {
-    tx.send(Bytes::from(sse::encode(ev))).await.is_ok()
+    tx.send(ev.clone()).await.is_ok()
 }
 
 async fn run_job(
@@ -511,12 +522,29 @@ async fn jobs(
     client_id: &str,
 ) -> Result<Resp, Resp> {
     let principals = authenticate(&relay, peer, req).await?;
-    let job = job_id(&principals.join("\n"), client_id);
+    Ok(sse_response(
+        open_job(relay, &principals, client_id).await?,
+        sse::encode,
+    ))
+}
+
+/// Attach to a running or finished deploy by client id. The caller is
+/// whoever the agents recorded for that id, falling back to the
+/// requester, so a dashboard user can follow a CI deploy it may read.
+pub async fn open_job(
+    relay: Arc<Relay>,
+    principals: &[String],
+    client_id: &str,
+) -> Result<mpsc::Receiver<Event>, Resp> {
+    let caller = relay
+        .job_caller(principals, client_id)
+        .unwrap_or_else(|| principals.join("\n"));
+    let job = job_id(&caller, client_id);
     let policy = &relay.cfg.policy;
     let mut candidates = Vec::new();
     for a in relay.agent_infos() {
         for f in a.flakelets {
-            if let Some(rule) = policy.rule_for(&principals, &a.host, &f.name) {
+            if let Some(rule) = policy.rule_for(principals, &a.host, &f.name) {
                 candidates.push(Planned {
                     target: format!("{}/{}", a.host, f.name),
                     host: a.host.clone(),
@@ -539,7 +567,7 @@ async fn jobs(
         ));
     }
     tracing::info!(job, targets = ?live.iter().map(|p| &p.target).collect::<Vec<_>>(), "job reattached");
-    let (tx, body) = Body::channel(64);
+    let (tx, rx) = mpsc::channel(64);
     let accepted = accepted_event(&relay, &job, &live);
     tokio::spawn(async move {
         if !emit(&tx, &accepted).await || !emit(&tx, &Event::Wave { index: 0 }).await {
@@ -559,5 +587,5 @@ async fn jobs(
         )
         .await;
     });
-    Ok(sse_response(body))
+    Ok(rx)
 }

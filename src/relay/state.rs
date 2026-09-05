@@ -127,6 +127,22 @@ impl Relay {
         a.jobs.insert(job.id.clone(), job);
     }
 
+    /// Connected agents reduced to the flakelets `principals` may read.
+    pub fn visible_agents(&self, principals: &[String]) -> Vec<AgentInfo> {
+        self.agent_infos()
+            .into_iter()
+            .filter_map(|mut a| {
+                a.flakelets.retain(|f| {
+                    self.cfg
+                        .policy
+                        .rule_for(principals, &a.host, &f.name)
+                        .is_some()
+                });
+                (!a.flakelets.is_empty()).then_some(a)
+            })
+            .collect()
+    }
+
     /// Every (host, flakelet) `principals` may read, with its latest job.
     pub fn host_flakelets(&self, principals: &[String]) -> Vec<HostFlakelet> {
         let agents = self.agents.lock().expect("poisoned");
@@ -158,6 +174,24 @@ impl Relay {
         }
         out.sort_by(|a, b| (&a.flakelet, &a.host).cmp(&(&b.flakelet, &b.host)));
         out
+    }
+
+    /// The caller the agents recorded for `client_id`, if `principals`
+    /// may read a target of it.
+    pub fn job_caller(&self, principals: &[String], client_id: &str) -> Option<String> {
+        let agents = self.agents.lock().expect("poisoned");
+        agents.iter().find_map(|(host, a)| {
+            a.jobs.values().find_map(|j| {
+                (j.client_id.as_deref() == Some(client_id)
+                    && self
+                        .cfg
+                        .policy
+                        .rule_for(principals, host, &j.flakelet)
+                        .is_some())
+                .then(|| j.caller.clone())
+                .flatten()
+            })
+        })
     }
 
     /// Deploys visible to `principals`, newest first, grouped across

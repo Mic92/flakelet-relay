@@ -290,3 +290,45 @@ button {
 button:hover {
   background: var(--sub2);
 }
+
+td.act {
+  text-align: right;
+}
+main.job h2 {
+  font-size: 1rem;
+  margin: 0 0 0.25rem;
+}
+h3 {
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+  font-weight: 600;
+  margin: 1rem 0 0.375rem;
+}
+ul.targets {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.5rem;
+}
+pre.log {
+  font: 0.75rem/1.45 ui-monospace, SFMono-Regular, monospace;
+  background: var(--sub);
+  border: 1px solid var(--line);
+  border-radius: 0.375rem;
+  padding: 0.625rem 0.75rem;
+  margin: 0;
+  max-height: 70vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+pre.log .t {
+  color: var(--faint);
+}
+pre.log .tail {
+  color: var(--bad);
+}

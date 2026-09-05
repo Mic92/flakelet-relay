@@ -462,6 +462,19 @@ in
         assert "hist1"[:8] in jobs and "agent/other" in jobs, jobs
         # The session cookie also authenticates the JSON API.
         client.succeed(f"{curl} -f https://relay:7443/v1/jobs | grep -q hist1")
+        # A job started by another caller (the admin cert) can be followed.
+        ev = client.succeed(f"{curl} -N --max-time 10 https://relay:7443/ui/jobs/hist1/events || true")
+        assert "event: result" in ev and "hx-partial" in ev, ev
+        # Deploy from the UI needs the htmx header, then redirects to the job page.
+        client.succeed(f"{curl} -o /dev/null -w '%{{http_code}}' -X POST 'https://relay:7443/ui/deploy?flakelet=other' | grep -q 403")
+        hdr = client.succeed(f"{curl} -D - -o /dev/null -H 'HX-Request: true' -X POST 'https://relay:7443/ui/deploy?flakelet=other'")
+        loc = next(l.split(":", 1)[1].strip() for l in hdr.splitlines() if l.lower().startswith("hx-redirect:"))
+        assert loc.startswith("/ui/jobs/"), hdr
+        ev = client.succeed(f"{curl} -N --max-time 30 https://relay:7443{loc}/events || true")
+        assert "event: result\ndata: true" in ev, ev
+        page = client.succeed(f"{curl} https://relay:7443{loc}")
+        assert "agent/other" in page and "unchanged" in page and "hx-sse:connect" in page, page
+        client.succeed(f"{curl} -sf -o /dev/null https://relay:7443/ui/static/htmx.min.js")
         client.succeed(f"{curl} -X POST -o /dev/null https://relay:7443/ui/logout")
         client.succeed(f"{curl} -o /dev/null -w '%{{http_code}}' https://relay:7443/ui/ | grep -q 303")
   '';
