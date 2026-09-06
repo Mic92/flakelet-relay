@@ -25,9 +25,8 @@ CI ──HTTPS──▶ relay A ◀──WSS── agent (web1)
 - **flakelet-relay** authenticates both sides, applies policy and
   forwards. Its only state is config, memory and a JWKS cache file, so
   several can run side by side and any one can be lost.
-- **flakelet-agent** runs updates for an allowlist of local flakelets
-  and keeps a job table on disk. It is the source of truth for what
-  happened.
+- **flakelet-agent** runs updates for the host's flakelets and keeps a
+  job table on disk. It is the source of truth for what happened.
 - **flakelet-push** posts a deploy, follows the stream, and retries or
   fails over between relays.
 
@@ -41,7 +40,7 @@ agents.
 ## Trust model
 
 An agent does what a relay tells it. The only instruction that exists
-is "run `flakelet update` for a flakelet on your allowlist". A stolen
+is "run `flakelet update <name>` now". A stolen
 relay key therefore lets an attacker make hosts update early from the
 flake ref they already trust, and nothing else.
 
@@ -140,9 +139,6 @@ logs and metrics. They are applied in three places:
 - **Agent**: the host id is the single `agents.<host>` entry the
   connection's principals match. The agent never names itself. If a
   live connection for that host already exists, the newcomer gets 409.
-
-On top of this the agent has its own `flakelets` allowlist, which is
-also what it advertises in `hello`.
 
 `flakelet-relay check-policy <config> <principal>... -- <target>...`
 evaluates the rules offline. The flakelet runs it at build time for

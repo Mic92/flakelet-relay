@@ -6,7 +6,7 @@ crane:
       type = types.attrsOf types.any;
       description = ''
         The agent's JSON config: `relays`, `relaySrv`, `caFile`,
-        `flakelets`, `tokenCommand`, `statusInterval`, `retention`.
+        `tokenCommand`, `statusInterval`, `retention`.
         `cert` and `key` are filled in from `certFile` and `keyFile`.
       '';
     };

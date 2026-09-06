@@ -77,7 +77,6 @@ pub struct Jobs {
     inner: Mutex<Inner>,
     /// Last `flakelet status`, refreshed by `watch_flakelets`.
     described: Mutex<Vec<Named>>,
-    flakelets: Vec<String>,
     flakelet_cmd: PathBuf,
     dir: PathBuf,
     retention: Retention,
@@ -97,12 +96,7 @@ impl Jobs {
     /// Load the table from `dir`, apply retention and resume what was
     /// pending or running.
     #[must_use]
-    pub fn new(
-        flakelets: Vec<String>,
-        flakelet_cmd: PathBuf,
-        dir: PathBuf,
-        retention: Retention,
-    ) -> Arc<Self> {
+    pub fn new(flakelet_cmd: PathBuf, dir: PathBuf, retention: Retention) -> Arc<Self> {
         let _ = std::fs::create_dir_all(&dir);
         let mut jobs = HashMap::new();
         for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
@@ -131,7 +125,6 @@ impl Jobs {
                 slots: HashMap::new(),
             }),
             described: Mutex::new(Vec::new()),
-            flakelets,
             flakelet_cmd,
             dir,
             retention,
@@ -239,7 +232,7 @@ impl Jobs {
         path
     }
 
-    /// Current generation and revision of every allowlisted flakelet,
+    /// Current generation and revision of every flakelet on the host,
     /// as of the last `refresh`.
     pub fn describe(&self) -> Vec<Named> {
         self.described.lock().expect("poisoned").clone()
@@ -247,9 +240,8 @@ impl Jobs {
 
     /// Re-run `flakelet status`. Broadcasts changes and records foreign switches.
     pub async fn refresh(&self) -> bool {
-        let mut out = Vec::with_capacity(self.flakelets.len());
-        for f in &self.flakelets {
-            let (named, changed) = exec::describe(&self.flakelet_cmd, f).await;
+        let mut out = Vec::new();
+        for (named, changed) in exec::describe_all(&self.flakelet_cmd).await {
             if let Some(c) = changed {
                 self.record_local(&named, &c);
             }
@@ -403,8 +395,8 @@ impl Jobs {
                 reason: Some(reason.into()),
             }]
         };
-        if !self.flakelets.iter().any(|f| f == flakelet) {
-            return refuse("flakelet not in agent allowlist");
+        if !self.describe().iter().any(|f| f.name == flakelet) {
+            return refuse("no such flakelet on this host");
         }
         let mut inner = self.inner.lock().expect("poisoned");
         if let Some(j) = inner.jobs.get(id) {

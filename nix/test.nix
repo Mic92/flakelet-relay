@@ -139,10 +139,6 @@ let
       settings = {
         relaySrv = "test";
         caFile = "${certs}/ca.pem";
-        flakelets = [
-          "app"
-          "other"
-        ];
         statusInterval = 2;
       };
     };

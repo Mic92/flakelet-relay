@@ -76,29 +76,42 @@ pub struct Run {
     pub before: Option<u64>,
 }
 
-/// What `hello` advertises for `name`, plus `.changed`.
-pub async fn describe(flakelet_cmd: &Path, name: &str) -> (Named, Option<Change>) {
-    let s = status(flakelet_cmd, name).await.unwrap_or_default();
-    (
-        Named {
-            name: name.to_owned(),
-            generation: s.generation,
-            revision: s.locked_url,
-        },
-        s.changed,
-    )
+/// Every flakelet on the host as advertised in `hello`, plus `.changed`.
+pub async fn describe_all(flakelet_cmd: &Path) -> Vec<(Named, Option<Change>)> {
+    let mut all = status_json(flakelet_cmd, None).await.unwrap_or_default();
+    all.sort_by(|a, b| a.name.cmp(&b.name));
+    all.into_iter()
+        .map(|s| {
+            (
+                Named {
+                    name: s.name,
+                    generation: s.generation,
+                    revision: s.locked_url,
+                },
+                s.changed,
+            )
+        })
+        .collect()
 }
 
+/// With a name flakelet also reports unit states.
 async fn status(flakelet_cmd: &Path, name: &str) -> Option<FlakeletStatus> {
+    status_json(flakelet_cmd, Some(name))
+        .await?
+        .into_iter()
+        .find(|s| s.name == name)
+}
+
+async fn status_json(flakelet_cmd: &Path, name: Option<&str>) -> Option<Vec<FlakeletStatus>> {
     let out = Command::new(flakelet_cmd)
-        .args(["status", "--json", name])
+        .args(["status", "--json"])
+        .args(name)
         .stdin(Stdio::null())
         .stderr(Stdio::inherit())
         .output()
         .await
         .ok()?;
-    let all: Vec<FlakeletStatus> = serde_json::from_slice(&out.stdout).ok()?;
-    all.into_iter().find(|s| s.name == name)
+    serde_json::from_slice(&out.stdout).ok()
 }
 
 async fn systemctl(args: &[&str]) -> String {

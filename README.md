@@ -18,7 +18,7 @@ services.flakelets.services = {
   flakelet-agent = {
     flake = "github:Mic92/flakelet-relay";
     output = "flakelets.agent";
-    settings = { certFile = …; keyFile = …; settings = { relaySrv = "example.org"; flakelets = [ "app" "flakelet-agent" ]; }; };
+    settings = { certFile = …; keyFile = …; settings = { relaySrv = "example.org"; }; };
   };
 };
 ```
