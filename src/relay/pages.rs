@@ -89,7 +89,12 @@ fn last_state(j: Option<&JobRef>) -> (&'static str, &'static str) {
 }
 
 fn short_rev(r: &str) -> &str {
-    let tail = r.rsplit(['/', ':', '=']).next().unwrap_or(r);
+    let (path, query) = r.split_once('?').unwrap_or((r, ""));
+    let tail = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("rev="))
+        .or_else(|| path.rsplit(['/', ':']).next())
+        .unwrap_or(path);
     &tail[..tail.len().min(12)]
 }
 
@@ -448,7 +453,20 @@ pub(crate) fn job(relay: &Relay, principals: &[String], id: &str) -> Markup {
 
 #[cfg(test)]
 mod tests {
-    use super::Filter;
+    use super::{Filter, short_rev};
+
+    #[test]
+    fn short_rev_uses_rev_not_nar_hash() {
+        assert_eq!(
+            short_rev(
+                "github:Mic92/tribuchet/71caf5d75be693a72299de34fd4a8f538f2deba4?narHash=sha256-1BkNm4b%3D"
+            ),
+            "71caf5d75be6"
+        );
+        assert_eq!(short_rev("git+https://x/y?ref=main&rev=abc"), "abc");
+        assert_eq!(short_rev("abc"), "abc");
+    }
+
 
     #[test]
     fn filter_terms_words_and_toggle() {
