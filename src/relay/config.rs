@@ -31,7 +31,7 @@ pub struct Config {
     pub tls: Option<Tls>,
     #[serde(default)]
     pub issuers: BTreeMap<String, IssuerConfig>,
-    /// CA bundle for talking to issuers; WebPKI roots if unset.
+    /// CA bundle for talking to issuers. WebPKI roots if unset.
     #[serde(default)]
     pub issuer_ca_file: Option<PathBuf>,
     #[serde(flatten)]

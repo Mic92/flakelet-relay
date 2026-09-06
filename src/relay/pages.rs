@@ -10,7 +10,7 @@ use crate::relay::login::now;
 use crate::relay::state::{HostFlakelet, Relay};
 
 /// `key:value` tokens and bare words from the search box. Values are
-/// globs; bare words match as substrings anywhere.
+/// globs. Bare words match as substrings anywhere.
 pub(crate) struct Filter {
     terms: Vec<(String, String)>,
     words: Vec<String>,
@@ -98,7 +98,7 @@ fn short_rev(r: &str) -> &str {
     &tail[..tail.len().min(12)]
 }
 
-/// Element id for a target; hex because host and flakelet names may
+/// Element id for a target. Hex because host and flakelet names may
 /// contain characters that are awkward in CSS selectors.
 pub(crate) fn target_id(target: &str) -> String {
     format!("t-{}", proto::hex(target.as_bytes()))

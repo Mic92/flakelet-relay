@@ -1,6 +1,6 @@
 //! JSON text messages over an already upgraded stream. The HTTP
 //! handshake stays with hyper on both sides (client certs, bearer
-//! tokens, SRV); framing is tokio-tungstenite's.
+//! tokens, SRV). Framing is tokio-tungstenite's.
 
 use base64::Engine as _;
 use futures_util::stream::{SplitSink, SplitStream};

@@ -58,7 +58,7 @@ pub struct Line {
     pub line: String,
 }
 
-/// A flakelet as advertised in `hello`; everything but `name` is what
+/// A flakelet as advertised in `hello`. Everything but `name` is what
 /// `flakelet status` last reported and may be absent.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Named {
@@ -135,7 +135,7 @@ pub enum Frame {
         /// Who asked (newline-joined principals) and under which id,
         /// recorded in the job table so any relay can list the deploy.
         caller: String,
-        /// Display name for `caller`; principals are for policy only.
+        /// Display name for `caller`. Principals are for policy only.
         caller_name: String,
         client_id: String,
         #[serde(default)]

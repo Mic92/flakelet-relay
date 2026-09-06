@@ -81,7 +81,7 @@ pub struct Jobs {
     flakelet_cmd: PathBuf,
     dir: PathBuf,
     retention: Retention,
-    /// Live frames for all connections; each relay forwards what it has
+    /// Live frames for all connections. Each relay forwards what it has
     /// subscribers for.
     events: broadcast::Sender<Frame>,
 }

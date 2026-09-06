@@ -71,7 +71,7 @@ pub fn server(cert: &Path, key_file: &Path, client_cas: &[PathBuf]) -> Result<Se
 }
 
 /// Client side for agent and push: `ca_file` pins the relay CA, otherwise
-/// WebPKI roots; `identity` presents a client certificate.
+/// WebPKI roots. `identity` presents a client certificate.
 pub fn client(
     ca_file: Option<&Path>,
     identity: Option<(&Path, &Path)>,

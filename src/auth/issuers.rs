@@ -14,7 +14,7 @@ use crate::oidc;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IssuerConfig {
-    /// Issuer URL as it appears in `iss`; discovery is fetched below it.
+    /// Issuer URL as it appears in `iss`. Discovery is fetched below it.
     pub url: String,
     pub audience: String,
     #[serde(default)]
@@ -51,7 +51,7 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// Union of both; the first non-empty name wins.
+    /// Union of both. The first non-empty name wins.
     pub fn merge(&mut self, other: Identity) {
         self.principals.extend(other.principals);
         if self.name.is_empty() {
