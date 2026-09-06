@@ -16,6 +16,8 @@ pub enum Status {
     Updated,
     Unchanged,
     RolledBack,
+    /// Host matched a target pattern but was not connected.
+    Offline,
     #[default]
     #[serde(other)]
     Failed,
@@ -34,6 +36,7 @@ impl Status {
             Status::Updated => "updated",
             Status::Unchanged => "unchanged",
             Status::RolledBack => "rolled-back",
+            Status::Offline => "offline",
             Status::Failed => "failed",
         }
     }

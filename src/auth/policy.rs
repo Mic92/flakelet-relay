@@ -71,7 +71,8 @@ impl Policy {
         })
     }
 
-    fn host_matches(&self, pattern: &str, host: &str) -> bool {
+    #[must_use]
+    pub fn host_matches(&self, pattern: &str, host: &str) -> bool {
         match pattern.strip_prefix('@') {
             Some(g) => self
                 .groups
