@@ -27,7 +27,42 @@ struct FlakeletStatus {
     held: Option<String>,
     #[serde(default)]
     unit_states: Vec<UnitState>,
+    #[serde(default)]
+    changed: Option<Change>,
 }
+
+/// `flakelet status --json | .changed`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Change {
+    pub generation: u64,
+    pub at: u64,
+    pub by: By,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum By {
+    Manual {
+        #[serde(default)]
+        user: Option<String>,
+    },
+    Unit {
+        unit: String,
+    },
+    Rollback {
+        from: u64,
+    },
+    External {
+        agent: String,
+        id: String,
+        #[serde(default)]
+        caller: Option<String>,
+    },
+    #[serde(other)]
+    Unknown,
+}
+
+pub const AGENT: &str = "flakelet-relay";
 
 #[derive(Debug, Deserialize)]
 struct UnitState {
@@ -41,14 +76,17 @@ pub struct Run {
     pub before: Option<u64>,
 }
 
-/// What `hello` advertises for `name`.
-pub async fn describe(flakelet_cmd: &Path, name: &str) -> Named {
+/// What `hello` advertises for `name`, plus `.changed`.
+pub async fn describe(flakelet_cmd: &Path, name: &str) -> (Named, Option<Change>) {
     let s = status(flakelet_cmd, name).await.unwrap_or_default();
-    Named {
-        name: name.to_owned(),
-        generation: s.generation,
-        revision: s.locked_url,
-    }
+    (
+        Named {
+            name: name.to_owned(),
+            generation: s.generation,
+            revision: s.locked_url,
+        },
+        s.changed,
+    )
 }
 
 async fn status(flakelet_cmd: &Path, name: &str) -> Option<FlakeletStatus> {
@@ -107,7 +145,7 @@ pub async fn prepare(flakelet_cmd: &Path, flakelet: &str) -> Run {
 }
 
 /// Start the unit. Returns once systemd has forked it.
-pub async fn start(flakelet_cmd: &Path, flakelet: &str) -> Result<(), String> {
+pub async fn start(flakelet_cmd: &Path, flakelet: &str, by_file: &Path) -> Result<(), String> {
     let unit = unit_name(flakelet);
     // A failed earlier run stays loaded and would block the name.
     systemctl(&["reset-failed", &unit]).await;
@@ -119,7 +157,8 @@ pub async fn start(flakelet_cmd: &Path, flakelet: &str) -> Result<(), String> {
         ))
         .arg("--")
         .arg(flakelet_cmd)
-        .args(["update", flakelet])
+        .args(["update", flakelet, "--by-file"])
+        .arg(by_file)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
