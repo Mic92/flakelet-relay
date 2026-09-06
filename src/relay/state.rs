@@ -28,7 +28,7 @@ pub struct Agent {
 
 pub enum Outgoing {
     Frame(Frame),
-    Pong(Vec<u8>),
+    Pong(bytes::Bytes),
 }
 
 /// One target of a running deploy. Frames are tagged with its index in
