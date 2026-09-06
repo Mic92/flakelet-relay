@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use crate::http::{self, Body, Resp};
 use crate::proto::{
     AgentsResponse, ApiError, DeployRequest, DoneBody, Event, Frame, JobsResponse, RelayInfo,
-    Status, Target, TargetStatus, job_id,
+    Status, Target, TargetStatus, display_caller, job_id,
 };
 use crate::relay::state::{Outgoing, Relay, Sub};
 use crate::relay::{agent_conn, login, ui};
@@ -275,7 +275,7 @@ pub fn start_deploy(
     let waves = plan(&relay, principals, &dr)?;
     let caller = principals.join("\n");
     let job = job_id(&caller, &dr.id);
-    tracing::info!(job, caller, targets = ?waves.iter().flatten().map(|p| &p.target).collect::<Vec<_>>(), "deploy accepted");
+    tracing::info!(job, caller = display_caller(&caller), targets = ?waves.iter().flatten().map(|p| &p.target).collect::<Vec<_>>(), "deploy accepted");
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(run_job(relay, job, caller, dr.id, waves, tx));
     Ok(rx)
