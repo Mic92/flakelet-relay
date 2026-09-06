@@ -137,13 +137,20 @@ pub async fn handle(relay: Arc<Relay>, req: Request<Incoming>) -> Resp {
             let f = Filter::parse(&q);
             let (tab, live, body) = match rest {
                 [""] => ("", true, pages::flakelets(&relay, p, &f)),
+                ["flakelets"] | ["flakelets", ""] => return redirect("/ui/"),
                 ["flakelets", name] => ("", true, pages::flakelet(&relay, p, name)),
                 ["hosts"] => ("hosts", true, pages::hosts(&relay, p, &f)),
                 ["jobs"] => ("jobs", true, pages::jobs(&relay, p, &f)),
                 ["jobs", id] => ("jobs", false, pages::job(&relay, p, id)),
                 ["jobs", id, "events"] => return job_events(relay.clone(), p, id).await,
                 ["events"] => return page_events(relay.clone(), sess, &req),
-                _ => return fail(StatusCode::NOT_FOUND, "no such page"),
+                _ => {
+                    let body = html! { main { p.notice { "No such page." } p { a href="/ui/" { "Back to overview" } } } };
+                    return page(
+                        StatusCode::NOT_FOUND,
+                        &layout(&relay.cfg.name, Some(&sess), "", None, &body),
+                    );
+                }
             };
             // List pages re-render `#main` whenever the relay's view changes.
             let events = live.then(|| format!("/ui/events?path={}&q={}", path, oidc_enc(&q)));
@@ -329,13 +336,27 @@ fn page_events(relay: Arc<Relay>, sess: Session, req: &Request<Incoming>) -> Res
 }
 
 /// One unnamed SSE message; a `data:` line per line of markup.
+/// One SSE event carrying `m`. `split` rather than `lines` because the
+/// client joins `data:` lines with LF and drops the last one, so a
+/// trailing newline in `<pre>` content needs its own empty `data:`.
 fn sse_html(m: &Markup) -> String {
     let mut out = String::new();
-    for line in m.0.lines() {
+    for line in m.0.split('\n') {
         out.push_str("data: ");
         out.push_str(line);
         out.push('\n');
     }
     out.push('\n');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_keeps_trailing_newline() {
+        let ev = sse_html(&html! { span { "a" } " b\n" });
+        assert_eq!(ev, "data: <span>a</span> b\ndata: \n\n");
+    }
 }
