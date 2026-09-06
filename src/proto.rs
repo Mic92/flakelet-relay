@@ -76,13 +76,10 @@ pub struct JobRef {
     pub id: String,
     pub flakelet: String,
     pub state: JobState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub caller: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub caller_name: Option<String>,
+    pub caller: String,
+    pub caller_name: String,
     /// The id the caller chose, shared by all targets of one deploy.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_id: Option<String>,
+    pub client_id: String,
     #[serde(default)]
     pub created: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,15 +132,12 @@ pub enum Frame {
         id: String,
         flakelet: String,
         rule: String,
-        /// Who asked and under which id, recorded in the job table so any
-        /// relay can list the deploy later.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        caller: Option<String>,
+        /// Who asked (newline-joined principals) and under which id,
+        /// recorded in the job table so any relay can list the deploy.
+        caller: String,
         /// Display name for `caller`; principals are for policy only.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        caller_name: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        client_id: Option<String>,
+        caller_name: String,
+        client_id: String,
         #[serde(default)]
         options: BTreeMap<String, Value>,
     },

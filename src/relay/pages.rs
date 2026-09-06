@@ -238,7 +238,7 @@ fn flakelet_row(g: &Group) -> Markup {
         td {
             @if let Some(j) = g.last {
                 (ago(j.created))
-                @if let Some(c) = &j.caller_name { span.dim title=[j.caller.as_deref()] { " by " (c) } }
+                span.dim title=(j.caller) { " by " (j.caller_name) }
             } @else { span.faint { "–" } }
         }
         td { span class={"pill " (g.status)} { (g.status) } }
@@ -286,7 +286,7 @@ pub(crate) fn flakelet(relay: &Relay, principals: &[String], name: &str) -> Mark
                         th scope="row" { (h.host) }
                         td { @if let Some(n) = h.generation { (n) } @else { span.faint { "–" } } }
                         td.mono { @if let Some(r) = &h.revision { span title=(r) { (short_rev(r)) } } @else { span.faint { "–" } } }
-                        td { @if let Some(j) = &h.last { a href={"/ui/jobs/" (j.client_id.as_deref().unwrap_or_default())} { (ago(j.created)) } } @else { span.faint { "–" } } }
+                        td { @if let Some(j) = &h.last { a href={"/ui/jobs/" (j.client_id)} { (ago(j.created)) } } @else { span.faint { "–" } } }
                         td { span class={"pill " (c)} { (l) } }
                     }
                 }
@@ -438,7 +438,7 @@ pub(crate) fn job(relay: &Relay, principals: &[String], id: &str) -> Markup {
         .bar {
             h2 { "Deploy " span.mono { (id.get(..8).unwrap_or(id)) } }
             @if let Some(j) = &summary {
-                span.dim { (ago(j.created)) @if !j.caller_name.is_empty() { " by " span title=(j.caller) { (j.caller_name) } } }
+                span.dim { (ago(j.created)) " by " span title=(j.caller) { (j.caller_name) } }
             }
             .sep {}
             (job_actions(id, ok))
