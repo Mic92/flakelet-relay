@@ -75,6 +75,8 @@ struct Inner {
 
 pub struct Jobs {
     inner: Mutex<Inner>,
+    /// Last `flakelet status`, refreshed by `watch_flakelets`.
+    described: Mutex<Vec<Named>>,
     flakelets: Vec<String>,
     flakelet_cmd: PathBuf,
     dir: PathBuf,
@@ -128,6 +130,7 @@ impl Jobs {
                 jobs,
                 slots: HashMap::new(),
             }),
+            described: Mutex::new(Vec::new()),
             flakelets,
             flakelet_cmd,
             dir,
@@ -216,13 +219,36 @@ impl Jobs {
         }
     }
 
-    /// Current generation and revision of every allowlisted flakelet.
-    pub async fn describe(&self) -> Vec<Named> {
+    /// Current generation and revision of every allowlisted flakelet,
+    /// as of the last `refresh`.
+    pub fn describe(&self) -> Vec<Named> {
+        self.described.lock().expect("poisoned").clone()
+    }
+
+    /// Re-run `flakelet status`; broadcasts `flakelets` when it changed.
+    pub async fn refresh(&self) -> bool {
         let mut out = Vec::with_capacity(self.flakelets.len());
         for f in &self.flakelets {
             out.push(exec::describe(&self.flakelet_cmd, f).await);
         }
-        out
+        let mut d = self.described.lock().expect("poisoned");
+        if *d == out {
+            return false;
+        }
+        d.clone_from(&out);
+        drop(d);
+        let _ = self.events.send(Frame::Flakelets { flakelets: out });
+        true
+    }
+
+    /// Poll `flakelet status` so relays see updates that did not go
+    /// through them (auto-update timer, manual runs, host activation).
+    pub async fn watch_flakelets(self: Arc<Self>, every: std::time::Duration) {
+        let mut tick = tokio::time::interval(every);
+        loop {
+            tick.tick().await;
+            self.refresh().await;
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Frame> {
@@ -420,6 +446,7 @@ impl Jobs {
             };
             if next.is_empty() {
                 self.prune();
+                self.refresh().await;
                 return;
             }
             ids = next;

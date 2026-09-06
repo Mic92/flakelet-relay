@@ -20,7 +20,7 @@ let
       cert = cfg.certFile;
       key = cfg.keyFile;
       flakeletCommand = cfg.flakeletCommand;
-      inherit (cfg) retention;
+      inherit (cfg) retention statusInterval;
     }
   );
 in
@@ -80,6 +80,12 @@ in
       type = lib.types.str;
       default = lib.getExe config.services.flakelets.package;
       defaultText = lib.literalExpression "lib.getExe config.services.flakelets.package";
+    };
+
+    statusInterval = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 60;
+      description = "Seconds between `flakelet status` polls, so relays see updates that bypassed them.";
     };
 
     retention = {

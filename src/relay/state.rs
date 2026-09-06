@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::auth::issuers::Issuers;
-use crate::proto::{AgentInfo, Frame, JobRef, JobState, JobSummary, JobTarget};
+use crate::proto::{AgentInfo, Frame, JobRef, JobState, JobSummary, JobTarget, Named};
 use crate::relay::config::Config;
 use crate::relay::session::Signer;
 
@@ -109,6 +109,14 @@ impl Relay {
             && a.conn == conn
         {
             a.last_seen = Instant::now();
+        }
+    }
+
+    pub fn record_flakelets(&self, host: &str, conn: u64, flakelets: Vec<Named>) {
+        let mut agents = self.agents.lock().expect("poisoned");
+        if let Some(a) = agents.get_mut(host).filter(|a| a.conn == conn) {
+            a.info.flakelets = flakelets;
+            let _ = self.changed.send(());
         }
     }
 
@@ -297,7 +305,7 @@ impl Relay {
             }
             match agents.get(h) {
                 Some(a) if a.info.flakelets.iter().any(|n| n.name == flakelet) => {
-                    live.push(h.clone())
+                    live.push(h.clone());
                 }
                 Some(_) => {}
                 None => offline.push(h.clone()),

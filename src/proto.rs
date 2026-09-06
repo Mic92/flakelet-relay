@@ -60,7 +60,7 @@ pub struct Line {
 
 /// A flakelet as advertised in `hello`; everything but `name` is what
 /// `flakelet status` last reported and may be absent.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct Named {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -165,6 +165,11 @@ pub enum Frame {
     /// state, so relays track jobs they did not start.
     Job {
         job: JobRef,
+    },
+    /// Agent to relay when `flakelet status` changed outside a job
+    /// (auto-update timer, manual update, host activation).
+    Flakelets {
+        flakelets: Vec<Named>,
     },
     /// Like `start` for a known id but never runs anything. Unknown ids
     /// get `error {code: unknown_job}`.
