@@ -7,7 +7,8 @@ use clap::{Parser, Subcommand};
 use flakelet_relay::client::{Client, Url, token_command};
 use flakelet_relay::http::{self, Body};
 use flakelet_relay::proto::{
-    AgentsResponse, ApiError, DeployRequest, Event, JobState, JobsResponse, Target, Wave, random_id,
+    AgentsResponse, ApiError, DeployRequest, Event, JobState, JobsResponse, Status, Target, Wave,
+    random_id,
 };
 use flakelet_relay::{oidc, srv, sse, tls};
 use http_body_util::BodyExt as _;
@@ -536,9 +537,17 @@ impl Printer {
             }
             Event::Result {
                 ok,
-                targets: _,
+                targets,
                 skipped,
             } => {
+                let offline: Vec<_> = targets
+                    .into_iter()
+                    .filter(|t| t.status == Status::Offline)
+                    .map(|t| t.target)
+                    .collect();
+                if !offline.is_empty() {
+                    let _ = writeln!(out, "» offline: {}", offline.join(", "));
+                }
                 if !skipped.is_empty() {
                     let s: Vec<_> = skipped.into_iter().map(|t| t.target).collect();
                     let _ = writeln!(out, "» skipped: {}", s.join(", "));

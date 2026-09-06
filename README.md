@@ -10,4 +10,5 @@ See [docs/DESIGN.md](docs/DESIGN.md).
 
 ```
 flakelet-push --relay https://relay.example.org deploy web1/app --wave web2/app web3/app
+flakelet-push --relay-srv example.org deploy web1/app --wave '*/app'   # canary, then the rest
 ```

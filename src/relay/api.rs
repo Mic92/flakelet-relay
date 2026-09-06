@@ -94,6 +94,61 @@ struct Planned {
     host: String,
     flakelet: String,
     rule: String,
+    /// Came from a host pattern and the agent is not connected; reported
+    /// in the result instead of rejecting the request.
+    offline: bool,
+}
+
+fn is_pattern(host: &str) -> bool {
+    host.contains('*') || host.starts_with('@')
+}
+
+/// Turn `pattern/flakelet` targets into one `Planned` per matching host
+/// and drop targets an earlier wave already covers, so `eve/x --wave
+/// '*/x'` means eve first, then the rest.
+fn expand(relay: &Relay, principals: &[String], dr: &DeployRequest) -> Vec<Vec<Planned>> {
+    let mut seen = std::collections::HashSet::new();
+    dr.waves
+        .iter()
+        .map(|w| {
+            let mut out = Vec::new();
+            for t in &w.targets {
+                let (host, flakelet) = t.split().unwrap_or(("", ""));
+                let hosts = if is_pattern(host) {
+                    let (live, offline) = relay.expand(principals, host, flakelet);
+                    live.into_iter()
+                        .map(|h| (h, false))
+                        .chain(offline.into_iter().map(|h| (h, true)))
+                        .collect()
+                } else {
+                    vec![(host.to_owned(), false)]
+                };
+                for (h, offline) in hosts {
+                    let target = if is_pattern(host) {
+                        format!("{h}/{flakelet}")
+                    } else {
+                        t.target.clone()
+                    };
+                    if !seen.insert(target.clone()) {
+                        continue;
+                    }
+                    let rule = relay
+                        .cfg
+                        .policy
+                        .rule_for(principals, &h, flakelet)
+                        .unwrap_or("");
+                    out.push(Planned {
+                        target,
+                        host: h,
+                        flakelet: flakelet.into(),
+                        rule: rule.into(),
+                        offline,
+                    });
+                }
+            }
+            out
+        })
+        .collect()
 }
 
 fn api_error(code: &str, message: &str, targets: &[&Planned]) -> ApiError {
@@ -148,7 +203,7 @@ const CHECKS: [Check; 4] = [
         "agent_unavailable",
         "agent not connected or flakelet not advertised",
         Some("unavailable"),
-        |r, p| !r.has_flakelet(&p.host, &p.flakelet),
+        |r, p| !p.offline && !r.has_flakelet(&p.host, &p.flakelet),
     ),
 ];
 
@@ -170,29 +225,13 @@ fn plan(
             api_error("unsupported_option", &msg, &[]),
         ));
     }
-    let waves: Vec<Vec<Planned>> = dr
-        .waves
-        .iter()
-        .map(|w| {
-            w.targets
-                .iter()
-                .map(|t| {
-                    let (host, flakelet) = t.split().unwrap_or(("", ""));
-                    let rule = relay
-                        .cfg
-                        .policy
-                        .rule_for(principals, host, flakelet)
-                        .unwrap_or("");
-                    Planned {
-                        target: t.target.clone(),
-                        host: host.into(),
-                        flakelet: flakelet.into(),
-                        rule: rule.into(),
-                    }
-                })
-                .collect()
-        })
-        .collect();
+    let waves = expand(relay, principals, dr);
+    if waves.iter().all(Vec::is_empty) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            api_error("no_targets", "pattern matched no host you may deploy", &[]),
+        ));
+    }
     for (status, code, message, metric, failed) in CHECKS {
         let hit: Vec<_> = waves
             .iter()
@@ -310,6 +349,15 @@ async fn run_job(
         if !emit(&tx, &Event::Wave { index }).await {
             return;
         }
+        let (offline, wave): (Vec<_>, Vec<_>) = wave.into_iter().partition(|p| p.offline);
+        for p in offline {
+            relay.count_deploy(&p.rule, &p.host, &p.flakelet, "offline");
+            ok = false;
+            results.push(TargetStatus {
+                target: p.target,
+                status: Status::Offline,
+            });
+        }
         let w = Wave::open(&relay, &job, wave, |id, p| Frame::Start {
             id,
             flakelet: p.flakelet.clone(),
@@ -322,7 +370,7 @@ async fn run_job(
         let Some(statuses) = w.stream(&tx, true).await else {
             return;
         };
-        ok = statuses.iter().all(|t| t.status.ok());
+        ok &= statuses.iter().all(|t| t.status.ok());
         results.extend(statuses);
     }
     tracing::info!(job, ok, "deploy finished");
@@ -553,6 +601,7 @@ pub async fn open_job(
                     host: a.host.clone(),
                     flakelet: f.name,
                     rule: rule.to_owned(),
+                    offline: false,
                 });
             }
         }
