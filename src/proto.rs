@@ -336,16 +336,6 @@ pub fn job_id(caller: &str, client_id: &str) -> String {
     hex(&ctx.finish().as_ref()[..16])
 }
 
-impl JobRef {
-    /// `caller_name`, or the first principal for jobs from older relays.
-    #[must_use]
-    pub fn caller_name(&self) -> Option<&str> {
-        self.caller_name
-            .as_deref()
-            .or_else(|| self.caller.as_deref()?.lines().next())
-    }
-}
-
 #[must_use]
 pub fn hex(bytes: &[u8]) -> String {
     bytes

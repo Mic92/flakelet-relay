@@ -238,7 +238,7 @@ fn flakelet_row(g: &Group) -> Markup {
         td {
             @if let Some(j) = g.last {
                 (ago(j.created))
-                @if let Some(c) = j.caller_name() { span.dim title=[j.caller.as_deref()] { " by " (c) } }
+                @if let Some(c) = &j.caller_name { span.dim title=[j.caller.as_deref()] { " by " (c) } }
             } @else { span.faint { "–" } }
         }
         td { span class={"pill " (g.status)} { (g.status) } }
@@ -438,7 +438,7 @@ pub(crate) fn job(relay: &Relay, principals: &[String], id: &str) -> Markup {
         .bar {
             h2 { "Deploy " span.mono { (id.get(..8).unwrap_or(id)) } }
             @if let Some(j) = &summary {
-                span.dim { (ago(j.created)) " by " span title=(j.caller) { (j.caller_name) } }
+                span.dim { (ago(j.created)) @if !j.caller_name.is_empty() { " by " span title=(j.caller) { (j.caller_name) } } }
             }
             .sep {}
             (job_actions(id, ok))
