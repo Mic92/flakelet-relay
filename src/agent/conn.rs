@@ -107,9 +107,7 @@ impl Conn {
             return Err("bad sec-websocket-accept".into());
         }
         let upgraded = hyper::upgrade::on(resp).await.map_err(|e| e.to_string())?;
-        let (r, w) = tokio::io::split(TokioIo::new(upgraded));
-        let mut reader = ws::Reader::new(r);
-        let mut writer = ws::Writer::new(w, Role::Client);
+        let (mut reader, mut writer) = ws::split(TokioIo::new(upgraded), Role::Client).await;
 
         let Ok(Ok(Message::Text(t))) =
             tokio::time::timeout(Duration::from_secs(10), reader.read()).await
@@ -120,7 +118,7 @@ impl Conn {
             return Err("first frame was not welcome".into());
         };
         writer
-            .send(&Frame::Hello {
+            .frame(&Frame::Hello {
                 version: proto::VERSION.into(),
                 capabilities: Vec::new(),
                 flakelets: self.jobs.describe(),
@@ -148,20 +146,20 @@ impl Conn {
                             Ok(Some(reason)) => return Ok(reason),
                             Err(e) => Err(e),
                         },
-                        Message::Ping(d) => writer.pong(&d).await,
-                        Message::Pong(_) => Ok(()),
-                        Message::Close => return Ok("closed by relay".into()),
+                        Message::Ping(d) => writer.send(Message::Pong(d)).await,
+                        Message::Close(_) => return Ok("closed by relay".into()),
+                        _ => Ok(()),
                     }
                 }
                 ev = events.recv() => match ev {
-                    Ok(f) => writer.send(&f).await,
+                    Ok(f) => writer.frame(&f).await,
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(relay = relay.name, "dropped {n} frames to slow relay");
                         Ok(())
                     }
                     Err(broadcast::error::RecvError::Closed) => return Ok("shutting down".into()),
                 },
-                _ = ping.tick() => writer.ping().await,
+                _ = ping.tick() => writer.send(Message::Ping(Vec::new().into())).await,
             };
             if let Err(e) = send {
                 return Ok(format!("write: {e}"));
@@ -170,7 +168,7 @@ impl Conn {
     }
 
     /// Handle one text frame. `Ok(Some(reason))` ends the connection.
-    async fn on_frame<W: tokio::io::AsyncWrite + Unpin>(
+    async fn on_frame<W: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
         &self,
         text: &str,
         relay: &str,
@@ -187,7 +185,7 @@ impl Conn {
             }) => {
                 tracing::info!(id, flakelet, rule, relay, ?caller, "start");
                 for f in self.jobs.start(&id, &flakelet, caller, client_id) {
-                    writer.send(&f).await?;
+                    writer.frame(&f).await?;
                 }
             }
             Ok(Frame::Query { id }) => {
@@ -199,7 +197,7 @@ impl Conn {
                     }]
                 });
                 for f in frames {
-                    writer.send(&f).await?;
+                    writer.frame(&f).await?;
                 }
             }
             Ok(Frame::Error { code, message, .. }) => {

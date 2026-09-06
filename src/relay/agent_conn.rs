@@ -76,9 +76,7 @@ async fn run<S>(relay: Arc<Relay>, host: String, io: S)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (r, w) = tokio::io::split(io);
-    let mut reader = ws::Reader::new(r);
-    let mut writer = ws::Writer::new(w, Role::Server);
+    let (mut reader, mut writer) = ws::split(io, Role::Server).await;
 
     let welcome = Frame::Welcome {
         host: host.clone(),
@@ -88,7 +86,7 @@ where
             capabilities: Vec::new(),
         },
     };
-    if writer.send(&welcome).await.is_err() {
+    if writer.frame(&welcome).await.is_err() {
         return;
     }
     let hello = tokio::time::timeout(Duration::from_secs(10), reader.read()).await;
@@ -129,8 +127,8 @@ where
             code: "conflict".into(),
             message: "another connection for this host is active".into(),
         };
-        let _ = writer.send(&err).await;
-        let _ = writer.close().await;
+        let _ = writer.frame(&err).await;
+        let _ = writer.send(Message::Close(None)).await;
         return;
     }
     tracing::info!(host, version = info.version, flakelets = ?info.flakelets, "agent connected");
@@ -141,14 +139,14 @@ where
     let writer_task = tokio::spawn(async move {
         while let Some(out) = rx.recv().await {
             let r = match out {
-                Outgoing::Frame(f) => writer.send(&f).await,
-                Outgoing::Pong(d) => writer.pong(&d).await,
+                Outgoing::Frame(f) => writer.frame(&f).await,
+                Outgoing::Pong(d) => writer.send(Message::Pong(d)).await,
             };
             if r.is_err() {
                 break;
             }
         }
-        let _ = writer.close().await;
+        let _ = writer.send(Message::Close(None)).await;
     });
     let reason = read_loop(&relay, &host, conn, &mut reader, &tx).await;
     relay.unregister(&host, conn);
@@ -158,11 +156,11 @@ where
 
 /// Route incoming frames until the connection ends; returns why. The
 /// agent pings every 20 s, so a minute of silence means it is gone.
-async fn read_loop<R: AsyncRead + Unpin>(
+async fn read_loop<S: AsyncRead + AsyncWrite + Unpin>(
     relay: &Relay,
     host: &str,
     conn: u64,
-    reader: &mut ws::Reader<R>,
+    reader: &mut ws::Reader<S>,
     tx: &mpsc::Sender<Outgoing>,
 ) -> String {
     loop {
@@ -204,8 +202,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
             Message::Ping(d) => {
                 let _ = tx.send(Outgoing::Pong(d)).await;
             }
-            Message::Pong(_) => {}
-            Message::Close => return "closed by agent".into(),
+            Message::Close(_) => return "closed by agent".into(),
+            _ => {}
         }
     }
 }
