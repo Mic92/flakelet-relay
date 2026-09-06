@@ -22,8 +22,6 @@ pub struct Config {
     /// Prints a bearer token on stdout. Used when no cert is configured.
     #[serde(default)]
     pub token_command: Option<Vec<String>>,
-    /// Local allowlist, also what `hello` advertises.
-    pub flakelets: Vec<String>,
     #[serde(default = "default_flakelet")]
     pub flakelet_command: PathBuf,
     #[serde(default)]

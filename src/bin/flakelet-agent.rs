@@ -45,7 +45,6 @@ async fn run(cli: Cli) -> Result<(), String> {
         tls::client(cfg.ca_file.as_deref(), identity).map_err(|e| e.to_string())?,
     ));
     let jobs = Jobs::new(
-        cfg.flakelets.clone(),
         cfg.flakelet_command.clone(),
         cli.state_dir.join("jobs"),
         cfg.retention.clone(),
