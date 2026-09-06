@@ -333,7 +333,7 @@ fn page_events(relay: Arc<Relay>, sess: Session, req: &Request<Incoming>) -> Res
         .expect("static headers")
 }
 
-/// One unnamed SSE message; a `data:` line per line of markup. `split`,
+/// One unnamed SSE message, a `data:` line per line of markup. `split`,
 /// not `lines`: the client rejoins with LF and drops the last one, so a
 /// trailing newline in `<pre>` content needs its own empty `data:`.
 fn sse_html(m: &Markup) -> String {

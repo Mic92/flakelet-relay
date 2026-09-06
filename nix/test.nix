@@ -172,7 +172,7 @@ let
           login.clientSecretFile = "${pkgs.writeText "secret" "s3cret"}";
         };
         agents.agent = [ "x509:dns:agent" ];
-        # Never connects; the dashboard lists it as disconnected.
+        # Never connects. The dashboard lists it as disconnected.
         agents.ghost = [ "x509:dns:ghost" ];
         groups.all = [ "agent" ];
         rules = {
@@ -379,7 +379,7 @@ in
 
     with subtest("host patterns expand on the relay"):
         set_app("${appV1}")
-        # @all is only `agent`; `*` also covers the never-connected ghost.
+        # @all is only `agent`. `*` also covers the never-connected ghost.
         out = client.succeed(f"{admin} deploy '@all/app' 2>&1")
         assert "agent/app:" in out and "ghost" not in out, out
         out = client.fail(f"{admin} deploy '*/app' 2>&1")

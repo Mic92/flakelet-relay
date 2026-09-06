@@ -57,9 +57,9 @@ enum Cmd {
         #[arg(long, default_value = "openid offline_access email groups")]
         scope: String,
     },
-    /// Deploy targets; `--wave` separates waves.
+    /// Deploy targets. `--wave` separates waves.
     Deploy {
-        /// Client id for idempotent retries; random if unset.
+        /// Client id for idempotent retries. Random if unset.
         #[arg(long)]
         id: Option<String>,
         /// Abort after this long without any event for a running target.

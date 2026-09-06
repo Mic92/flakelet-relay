@@ -105,7 +105,7 @@ struct Planned {
     host: String,
     flakelet: String,
     rule: String,
-    /// Came from a host pattern and the agent is not connected; reported
+    /// Came from a host pattern and the agent is not connected. Reported
     /// in the result instead of rejecting the request.
     offline: bool,
 }

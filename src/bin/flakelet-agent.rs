@@ -51,7 +51,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         cfg.retention.clone(),
     );
     // `flakelet status` can take many seconds on hosts with lots of
-    // template instances; have it ready before any relay's hello timer runs.
+    // template instances. Have it ready before any relay's hello timer runs.
     jobs.refresh().await;
     tokio::spawn(
         jobs.clone()

@@ -190,7 +190,7 @@ fn verify_sig(alg: &str, k: &Jwk, msg: &[u8], sig: &[u8]) -> Result<(), Error> {
 }
 
 /// `oidc:<name>:<sub>` plus `oidc:<name>:<claim>:<value>` for the
-/// configured claims; list claims yield one principal per element.
+/// configured claims. List claims yield one principal per element.
 #[must_use]
 pub fn principals(name: &str, claims: &Claims, principal_claims: &[String]) -> Vec<String> {
     let mut out = vec![format!("oidc:{name}:{}", claims.sub)];

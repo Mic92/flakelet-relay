@@ -189,10 +189,10 @@ hub/app-hub`.
 
 The host part may be a glob or `@group` (as in policy targets). The
 relay expands it to every configured agent the caller may deploy that
-flakelet on; targets already named in an earlier wave are dropped, so
+flakelet on. Targets already named in an earlier wave are dropped, so
 `web1/app --wave '*/app'` is a canary. Matching agents that are not
 connected end up in `result.targets` with status `offline` and make the
-job fail; a pattern that matches nothing is `404 no_targets`.
+job fail. A pattern that matches nothing is `404 no_targets`.
 
 The response is an SSE stream:
 

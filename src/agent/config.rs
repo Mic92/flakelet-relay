@@ -12,14 +12,14 @@ pub struct Config {
     /// expiry but at most once a minute.
     #[serde(default)]
     pub relay_srv: Option<String>,
-    /// Pin for the relay server certificate; WebPKI roots if unset.
+    /// Pin for the relay server certificate. WebPKI roots if unset.
     #[serde(default)]
     pub ca_file: Option<PathBuf>,
     #[serde(default)]
     pub cert: Option<PathBuf>,
     #[serde(default)]
     pub key: Option<PathBuf>,
-    /// Prints a bearer token on stdout; used when no cert is configured.
+    /// Prints a bearer token on stdout. Used when no cert is configured.
     #[serde(default)]
     pub token_command: Option<Vec<String>>,
     /// Local allowlist, also what `hello` advertises.
@@ -38,7 +38,7 @@ fn default_status_interval() -> u64 {
 }
 
 /// How long the job table keeps entries. Logs dominate the size, so
-/// they go first; summaries are a few hundred bytes each.
+/// they go first. Summaries are a few hundred bytes each.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Retention {

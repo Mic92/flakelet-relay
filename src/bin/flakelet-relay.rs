@@ -24,7 +24,7 @@ enum Cmd {
     Serve {
         #[arg(long)]
         config: PathBuf,
-        /// JWKS cache directory; defaults to $CACHE_DIRECTORY.
+        /// JWKS cache directory. Defaults to $CACHE_DIRECTORY.
         #[arg(long, env = "CACHE_DIRECTORY")]
         cache_dir: Option<PathBuf>,
     },

@@ -154,7 +154,7 @@ where
     tracing::info!(host, "agent disconnected: {reason}");
 }
 
-/// Route incoming frames until the connection ends; returns why. The
+/// Route incoming frames until the connection ends and return why. The
 /// agent pings every 20 s, so a minute of silence means it is gone.
 async fn read_loop<S: AsyncRead + AsyncWrite + Unpin>(
     relay: &Relay,
