@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::jwt::{self, Jwks};
 use crate::client::Client;
@@ -41,10 +41,12 @@ fn default_display_claims() -> Vec<String> {
 }
 
 /// Who a request speaks for.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Identity {
+    #[serde(rename = "p")]
     pub principals: Vec<String>,
     /// For display only, never matched against policy.
+    #[serde(rename = "n")]
     pub name: String,
 }
 

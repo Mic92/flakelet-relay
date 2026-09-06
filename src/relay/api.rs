@@ -56,10 +56,7 @@ pub async fn identify(
     let mut id = x509::identity(peer);
     let mut reason = String::from("no credentials");
     if let Some(s) = login::current(relay, req) {
-        id.merge(Identity {
-            principals: s.principals,
-            name: s.name,
-        });
+        id.merge(s.who);
     }
     if let Some(tok) = http::bearer(req) {
         match relay.issuers.identify(tok).await {
