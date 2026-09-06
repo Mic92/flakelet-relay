@@ -28,12 +28,9 @@ struct Job {
     created: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     finished: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    caller: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    caller_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    client_id: Option<String>,
+    caller: String,
+    caller_name: String,
+    client_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     run: Option<Run>,
     #[serde(default)]
@@ -307,9 +304,9 @@ impl Jobs {
         self: &Arc<Self>,
         id: &str,
         flakelet: &str,
-        caller: Option<String>,
-        caller_name: Option<String>,
-        client_id: Option<String>,
+        caller: String,
+        caller_name: String,
+        client_id: String,
     ) -> Vec<Frame> {
         let refuse = |reason: &str| {
             vec![Frame::Ack {

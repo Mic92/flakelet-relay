@@ -209,14 +209,13 @@ impl Relay {
         let agents = self.agents.lock().expect("poisoned");
         agents.iter().find_map(|(host, a)| {
             a.jobs.values().find_map(|j| {
-                (j.client_id.as_deref() == Some(client_id)
+                (j.client_id == client_id
                     && self
                         .cfg
                         .policy
                         .rule_for(principals, host, &j.flakelet)
                         .is_some())
                 .then(|| j.caller.clone())
-                .flatten()
             })
         })
     }
@@ -228,9 +227,6 @@ impl Relay {
         let mut by: HashMap<(&str, &str), JobSummary> = HashMap::new();
         for (host, a) in agents.iter() {
             for j in a.jobs.values() {
-                let (Some(caller), Some(cid)) = (&j.caller, &j.client_id) else {
-                    continue;
-                };
                 if self
                     .cfg
                     .policy
@@ -239,14 +235,16 @@ impl Relay {
                 {
                     continue;
                 }
-                let s = by.entry((caller, cid)).or_insert_with(|| JobSummary {
-                    id: cid.clone(),
-                    caller: caller.clone(),
-                    caller_name: j.caller_name.clone().unwrap_or_default(),
-                    created: j.created,
-                    finished: j.finished,
-                    targets: Vec::new(),
-                });
+                let s = by
+                    .entry((&j.caller, &j.client_id))
+                    .or_insert_with(|| JobSummary {
+                        id: j.client_id.clone(),
+                        caller: j.caller.clone(),
+                        caller_name: j.caller_name.clone(),
+                        created: j.created,
+                        finished: j.finished,
+                        targets: Vec::new(),
+                    });
                 s.created = s.created.min(j.created);
                 s.finished = s.finished.zip(j.finished).map(|(a, b)| a.max(b));
                 s.targets.push(JobTarget {

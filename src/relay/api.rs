@@ -382,9 +382,9 @@ async fn run_job(
             id,
             flakelet: p.flakelet.clone(),
             rule: p.rule.clone(),
-            caller: Some(caller.clone()),
-            caller_name: Some(caller_name.clone()),
-            client_id: Some(client_id.clone()),
+            caller: caller.clone(),
+            caller_name: caller_name.clone(),
+            client_id: client_id.clone(),
             options: BTreeMap::default(),
         })
         .await;
