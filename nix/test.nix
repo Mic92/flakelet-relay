@@ -279,6 +279,7 @@ in
           "app"
           "other"
         ];
+        statusInterval = 2;
       };
     };
 
@@ -401,6 +402,17 @@ in
         tok = token("repo:github:example/app:ref:refs/heads/main")
         out = client.succeed(f"FLAKELET_RELAY_TOKEN_COMMAND='echo {tok}' push --relay https://relay:7443 agents")
         assert "\tapp@" in out and "other" not in out, out
+
+    with subtest("out-of-band flakelet update reaches the relay without reconnect"):
+        gen = int(agent.succeed("flakelet status --json app | jq '.[0].generation'"))
+        conns = agent.succeed("journalctl -u flakelet-agent -o cat | grep -c '\"connected\"' || true").strip()
+        set_app("${appV2}")
+        agent.succeed("flakelet update app")
+        client.wait_until_succeeds(f"{admin} agents | grep -q 'app@{gen + 1}'", timeout=30)
+        assert conns == agent.succeed("journalctl -u flakelet-agent -o cat | grep -c '\"connected\"' || true").strip()
+        set_app("${appV1}")
+        agent.succeed("flakelet update app")
+        client.wait_until_succeeds(f"{admin} agents | grep -q 'app@{gen + 2}'", timeout=30)
 
     with subtest("certificate not listed under agents cannot connect as agent"):
         out = client.succeed(

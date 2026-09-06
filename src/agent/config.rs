@@ -28,6 +28,13 @@ pub struct Config {
     pub flakelet_command: PathBuf,
     #[serde(default)]
     pub retention: Retention,
+    /// Seconds between `flakelet status` polls for out-of-band changes.
+    #[serde(default = "default_status_interval")]
+    pub status_interval: u64,
+}
+
+fn default_status_interval() -> u64 {
+    60
 }
 
 /// How long the job table keeps entries. Logs dominate the size, so

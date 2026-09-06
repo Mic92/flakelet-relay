@@ -303,7 +303,11 @@ Relays store none of this, by design. `hello` carries recent job summaries per
 flakelet, and every state change goes out as a `job` frame to all
 connected relays. That is enough for any relay to answer `GET /v1/jobs`
 and to know each flakelet's current generation and revision, including
-for deploys that went through a different relay.
+for deploys that went through a different relay. Updates that bypass
+the relays entirely (flakelet's auto-update timer, a manual `flakelet
+update`, host activation) are picked up by polling `flakelet status`
+every `statusInterval` seconds and sent as a `flakelets` frame when the
+answer changed.
 
 Deciding the result: a failed unit is `failed`. Otherwise the
 agent compares generation and health from `flakelet status --json`

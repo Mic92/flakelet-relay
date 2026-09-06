@@ -180,6 +180,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 };
                 match &frame {
                     Frame::Job { job } => relay.record_job(host, conn, job.clone()),
+                    Frame::Flakelets { flakelets } => {
+                        relay.record_flakelets(host, conn, flakelets.clone());
+                    }
                     Frame::Ack { id, .. }
                     | Frame::Log { id, .. }
                     | Frame::Progress { id }

@@ -73,9 +73,6 @@ impl Conn {
     /// One connection lifetime. `Ok` means it was established and later
     /// ended, `Err` that it never got going.
     async fn once(&self) -> Result<String, String> {
-        // `flakelet status` can take many seconds on hosts with lots of
-        // template instances; gather it before the relay's hello timer runs.
-        let flakelets = self.jobs.describe().await;
         let key = ws::new_key();
         let mut req = Request::get(format!("{}/v1/agent", self.url.path))
             .header(UPGRADE, "websocket")
@@ -126,7 +123,7 @@ impl Conn {
             .send(&Frame::Hello {
                 version: proto::VERSION.into(),
                 capabilities: Vec::new(),
-                flakelets,
+                flakelets: self.jobs.describe(),
                 jobs: self.jobs.refs(),
             })
             .await

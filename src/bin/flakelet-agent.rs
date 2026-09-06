@@ -50,6 +50,13 @@ async fn run(cli: Cli) -> Result<(), String> {
         cli.state_dir.join("jobs"),
         cfg.retention.clone(),
     );
+    // `flakelet status` can take many seconds on hosts with lots of
+    // template instances; have it ready before any relay's hello timer runs.
+    jobs.refresh().await;
+    tokio::spawn(
+        jobs.clone()
+            .watch_flakelets(Duration::from_secs(cfg.status_interval.max(1))),
+    );
     let fixed: Vec<Url> = cfg
         .relays
         .iter()
