@@ -98,16 +98,6 @@ fn short_rev(r: &str) -> &str {
     &tail[..tail.len().min(12)]
 }
 
-/// One principal for display; the full caller goes in a title attribute.
-/// OIDC `sub` is often an opaque UUID, so prefer an email principal.
-fn short(caller: &str) -> &str {
-    let mut lines = caller.lines();
-    let first = lines.next().unwrap_or_default();
-    lines
-        .find_map(|l| l.split_once(":email:").map(|(_, v)| v))
-        .unwrap_or(first)
-}
-
 /// Element id for a target; hex because host and flakelet names may
 /// contain characters that are awkward in CSS selectors.
 pub(crate) fn target_id(target: &str) -> String {
@@ -248,7 +238,7 @@ fn flakelet_row(g: &Group) -> Markup {
         td {
             @if let Some(j) = g.last {
                 (ago(j.created))
-                @if let Some(c) = &j.caller { span.dim title=(c) { " by " (short(c)) } }
+                @if let Some(c) = &j.caller { span.dim title=(c) { " by " (proto::display_caller(c)) } }
             } @else { span.faint { "–" } }
         }
         td { span class={"pill " (g.status)} { (g.status) } }
@@ -367,7 +357,7 @@ fn job_table(jobs: &[JobSummary]) -> Markup {
                 @for j in jobs {
                     tr {
                         td { (ago(j.created)) }
-                        td.trunc title=(j.caller) { (short(&j.caller)) }
+                        td.trunc title=(j.caller) { (proto::display_caller(&j.caller)) }
                         td.wrap { @for t in &j.targets { (pill(&t.target, t.state, t.status)) " " } }
                         td.mono { a href={"/ui/jobs/" (j.id)} { (j.id.get(..8).unwrap_or(&j.id)) } }
                     }
@@ -440,7 +430,7 @@ pub(crate) fn job(relay: &Relay, principals: &[String], id: &str) -> Markup {
         .bar {
             h2 { "Deploy " span.mono { (id.get(..8).unwrap_or(id)) } }
             @if let Some(j) = &summary {
-                span.dim { (ago(j.created)) " by " span title=(j.caller) { (short(&j.caller)) } }
+                span.dim { (ago(j.created)) " by " span title=(j.caller) { (proto::display_caller(&j.caller)) } }
             }
             .sep {}
             (job_actions(id, ok))
@@ -458,7 +448,7 @@ pub(crate) fn job(relay: &Relay, principals: &[String], id: &str) -> Markup {
 
 #[cfg(test)]
 mod tests {
-    use super::{Filter, short, short_rev};
+    use super::{Filter, short_rev};
 
     #[test]
     fn short_rev_uses_rev_not_nar_hash() {
@@ -470,13 +460,6 @@ mod tests {
         );
         assert_eq!(short_rev("git+https://x/y?ref=main&rev=abc"), "abc");
         assert_eq!(short_rev("abc"), "abc");
-    }
-
-    #[test]
-    fn short_prefers_email_over_opaque_sub() {
-        let c = "oidc:authelia:1967320f-21d8\noidc:authelia:email:joerg@thalheim.io\noidc:authelia:groups:admins";
-        assert_eq!(short(c), "joerg@thalheim.io");
-        assert_eq!(short("cn:ci\nsan:ci.example"), "cn:ci");
     }
 
     #[test]

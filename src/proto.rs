@@ -330,6 +330,17 @@ pub fn job_id(caller: &str, client_id: &str) -> String {
     hex(&ctx.finish().as_ref()[..16])
 }
 
+/// One principal of a newline-joined caller for display and logs.
+/// OIDC `sub` is often an opaque UUID, so prefer an email principal.
+#[must_use]
+pub fn display_caller(caller: &str) -> &str {
+    let mut lines = caller.lines();
+    let first = lines.next().unwrap_or_default();
+    lines
+        .find_map(|l| l.split_once(":email:").map(|(_, v)| v))
+        .unwrap_or(first)
+}
+
 #[must_use]
 pub fn hex(bytes: &[u8]) -> String {
     bytes
@@ -350,6 +361,13 @@ pub fn random_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_caller_prefers_email_over_opaque_sub() {
+        let c = "oidc:authelia:1967320f-21d8\noidc:authelia:email:joerg@thalheim.io\noidc:authelia:groups:admins";
+        assert_eq!(display_caller(c), "joerg@thalheim.io");
+        assert_eq!(display_caller("cn:ci\nsan:ci.example"), "cn:ci");
+    }
 
     #[test]
     fn unknown_frame_type_is_tolerated() {
