@@ -1,3 +1,4 @@
+crane:
 { types, ... }:
 {
   options = {
@@ -39,7 +40,7 @@
     let
       inherit (inputs.nixpkgs) pkgs lib;
       inherit (inputs.flakelet) name;
-      package = import ./build.nix { inherit pkgs lib; };
+      package = pkgs.callPackage ./package.nix { craneLib = crane.mkLib pkgs; };
       tls = options.certFile != null;
       credentials = "/run/credentials/${name}.service";
       json = (pkgs.formats.json { }).generate "${name}.json" (
