@@ -219,17 +219,41 @@ impl Jobs {
         }
     }
 
+    /// `--by-file` content so flakelet attributes the generation to `ids[0]`.
+    fn write_by_file(&self, flakelet: &str, ids: &[String]) -> PathBuf {
+        let caller_name = {
+            let inner = self.inner.lock().expect("poisoned");
+            ids.first()
+                .and_then(|id| inner.jobs.get(id))
+                .map(|j| j.caller_name.clone())
+        };
+        let by = exec::By::External {
+            agent: exec::AGENT.into(),
+            id: ids.first().cloned().unwrap_or_default(),
+            caller: caller_name,
+        };
+        let path = self.dir.join(format!("{flakelet}.by.json"));
+        if let Err(e) = std::fs::write(&path, serde_json::to_vec(&by).expect("serializable")) {
+            tracing::warn!(flakelet, "cannot write by-file: {e}");
+        }
+        path
+    }
+
     /// Current generation and revision of every allowlisted flakelet,
     /// as of the last `refresh`.
     pub fn describe(&self) -> Vec<Named> {
         self.described.lock().expect("poisoned").clone()
     }
 
-    /// Re-run `flakelet status`; broadcasts `flakelets` when it changed.
+    /// Re-run `flakelet status`. Broadcasts changes and records foreign switches.
     pub async fn refresh(&self) -> bool {
         let mut out = Vec::with_capacity(self.flakelets.len());
         for f in &self.flakelets {
-            out.push(exec::describe(&self.flakelet_cmd, f).await);
+            let (named, changed) = exec::describe(&self.flakelet_cmd, f).await;
+            if let Some(c) = changed {
+                self.record_local(&named, &c);
+            }
+            out.push(named);
         }
         let mut d = self.described.lock().expect("poisoned");
         if *d == out {
@@ -239,6 +263,70 @@ impl Jobs {
         drop(d);
         let _ = self.events.send(Frame::Flakelets { flakelets: out });
         true
+    }
+
+    /// Add a job for a generation switch that was not one of ours, once.
+    fn record_local(&self, named: &Named, c: &exec::Change) {
+        use exec::By;
+        if let By::External { agent, id, .. } = &c.by
+            && agent == exec::AGENT
+            && self.inner.lock().expect("poisoned").jobs.contains_key(id)
+        {
+            return;
+        }
+        let id = format!("local-{}-{}-{}", named.name, c.generation, c.at);
+        let mut inner = self.inner.lock().expect("poisoned");
+        if inner.jobs.contains_key(&id) {
+            return;
+        }
+        let caller_name = match &c.by {
+            By::Manual { user: Some(u) } => format!("{u} (shell)"),
+            By::Manual { user: None } => "shell".into(),
+            By::Unit { unit } if *unit == format!("flakelet-{}-auto.service", named.name) => {
+                "auto-update".into()
+            }
+            By::Unit { unit } if *unit == format!("flakelet-{}.service", named.name) => {
+                "host activation".into()
+            }
+            By::Unit { unit } => unit.clone(),
+            By::Rollback { from } => format!("rollback from {from}"),
+            By::External { agent, caller, .. } => match caller {
+                Some(c) => format!("{c} via {agent}"),
+                None => agent.clone(),
+            },
+            By::Unknown => "unknown".into(),
+        };
+        tracing::info!(
+            flakelet = named.name,
+            generation = c.generation,
+            by = caller_name,
+            "local change"
+        );
+        let job = Job {
+            flakelet: named.name.clone(),
+            state: JobState::Done,
+            created: c.at,
+            finished: Some(c.at),
+            caller: String::new(),
+            caller_name,
+            client_id: id.clone(),
+            done: Some(DoneBody {
+                status: if matches!(c.by, By::Rollback { .. }) {
+                    Status::RolledBack
+                } else {
+                    Status::Updated
+                },
+                generation: Some(c.generation),
+                revision: named.revision.clone(),
+                tail: None,
+            }),
+            ..Default::default()
+        };
+        let _ = self.events.send(Frame::Job {
+            job: job.summary(&id),
+        });
+        inner.jobs.insert(id.clone(), job);
+        self.save(&inner, &id);
     }
 
     /// Poll `flakelet status` so relays see updates that did not go
@@ -382,7 +470,8 @@ impl Jobs {
                         self.save(&inner, id);
                     }
                 }
-                exec::start(&self.flakelet_cmd, &flakelet)
+                let by_file = self.write_by_file(&flakelet, &ids);
+                exec::start(&self.flakelet_cmd, &flakelet, &by_file)
                     .await
                     .map(|()| run)
             };

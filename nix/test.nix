@@ -338,6 +338,8 @@ in
         assert "agent/app: updated (generation 2)" in out, out
         agent.succeed("systemctl show app.service -p Description | grep -q 'app v2'")
         agent.succeed("journalctl -u flakelet-relay-job-app.service | grep -q 'generation 2'")
+        by = agent.succeed("flakelet status --json app | jq -c '.[0].changed.by'")
+        assert '"kind":"external","agent":"flakelet-relay"' in by and '"caller":"admin@example.org"' in by, by
 
     with subtest("deploy with OIDC token, sub principal"):
         set_app("${appV1}")
@@ -420,6 +422,12 @@ in
         agent.succeed("flakelet update app")
         client.wait_until_succeeds(f"{admin} agents | grep -q 'app@{gen + 1}'", timeout=30)
         assert conns == agent.succeed("journalctl -u flakelet-agent -o cat | grep -c '\"connected\"' || true").strip()
+        # Shows up as a local job.
+        out = client.wait_until_succeeds(f"{admin} jobs | grep local-app-{gen + 1}-", timeout=30)
+        assert "\troot (shell)\t" in out and "agent/app:updated" in out, out
+        # That one and the boot-time activation, none for relay deploys.
+        out = client.succeed(f"{admin} jobs | grep local-app-")
+        assert len(out.splitlines()) == 2 and "\thost activation\t" in out, out
         set_app("${appV1}")
         agent.succeed("flakelet update app")
         client.wait_until_succeeds(f"{admin} agents | grep -q 'app@{gen + 2}'", timeout=30)
