@@ -98,9 +98,14 @@ fn short_rev(r: &str) -> &str {
     &tail[..tail.len().min(12)]
 }
 
-/// First principal only; the full caller goes in a title attribute.
+/// One principal for display; the full caller goes in a title attribute.
+/// OIDC `sub` is often an opaque UUID, so prefer an email principal.
 fn short(caller: &str) -> &str {
-    caller.lines().next().unwrap_or_default()
+    let mut lines = caller.lines();
+    let first = lines.next().unwrap_or_default();
+    lines
+        .find_map(|l| l.split_once(":email:").map(|(_, v)| v))
+        .unwrap_or(first)
 }
 
 /// Element id for a target; hex because host and flakelet names may
@@ -453,7 +458,7 @@ pub(crate) fn job(relay: &Relay, principals: &[String], id: &str) -> Markup {
 
 #[cfg(test)]
 mod tests {
-    use super::{Filter, short_rev};
+    use super::{Filter, short, short_rev};
 
     #[test]
     fn short_rev_uses_rev_not_nar_hash() {
@@ -465,6 +470,13 @@ mod tests {
         );
         assert_eq!(short_rev("git+https://x/y?ref=main&rev=abc"), "abc");
         assert_eq!(short_rev("abc"), "abc");
+    }
+
+    #[test]
+    fn short_prefers_email_over_opaque_sub() {
+        let c = "oidc:authelia:1967320f-21d8\noidc:authelia:email:joerg@thalheim.io\noidc:authelia:groups:admins";
+        assert_eq!(short(c), "joerg@thalheim.io");
+        assert_eq!(short("cn:ci\nsan:ci.example"), "cn:ci");
     }
 
     #[test]
