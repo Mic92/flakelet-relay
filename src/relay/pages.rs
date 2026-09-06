@@ -100,7 +100,7 @@ fn short_rev(r: &str) -> &str {
 
 /// One principal for display; the full caller goes in a title attribute.
 /// OIDC `sub` is often an opaque UUID, so prefer an email principal.
-fn short(caller: &str) -> &str {
+pub(crate) fn short(caller: &str) -> &str {
     let mut lines = caller.lines();
     let first = lines.next().unwrap_or_default();
     lines

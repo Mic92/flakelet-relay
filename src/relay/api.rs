@@ -275,7 +275,7 @@ pub fn start_deploy(
     let waves = plan(&relay, principals, &dr)?;
     let caller = principals.join("\n");
     let job = job_id(&caller, &dr.id);
-    tracing::info!(job, caller, targets = ?waves.iter().flatten().map(|p| &p.target).collect::<Vec<_>>(), "deploy accepted");
+    tracing::info!(job, caller = crate::relay::pages::short(&caller), targets = ?waves.iter().flatten().map(|p| &p.target).collect::<Vec<_>>(), "deploy accepted");
     let (tx, rx) = mpsc::channel(64);
     tokio::spawn(run_job(relay, job, caller, dr.id, waves, tx));
     Ok(rx)
