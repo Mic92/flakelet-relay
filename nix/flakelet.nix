@@ -39,19 +39,7 @@
     let
       inherit (inputs.nixpkgs) pkgs lib;
       inherit (inputs.flakelet) name;
-      package = pkgs.rustPlatform.buildRustPackage {
-        pname = "flakelet-relay";
-        version = "0.1.0";
-        src = lib.fileset.toSource {
-          root = ./..;
-          fileset = lib.fileset.unions [
-            ../Cargo.toml
-            ../Cargo.lock
-            ../src
-          ];
-        };
-        cargoLock.lockFile = ../Cargo.lock;
-      };
+      package = import ./build.nix { inherit pkgs lib; };
       tls = options.certFile != null;
       credentials = "/run/credentials/${name}.service";
       json = (pkgs.formats.json { }).generate "${name}.json" (
