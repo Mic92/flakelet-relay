@@ -8,10 +8,12 @@ use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
 use tokio::sync::mpsc;
 
+use crate::auth::issuers::Identity;
+use crate::auth::x509;
 use crate::http::{self, Body, Resp};
 use crate::proto::{
     AgentsResponse, ApiError, DeployRequest, DoneBody, Event, Frame, JobsResponse, RelayInfo,
-    Status, Target, TargetStatus, display_caller, job_id,
+    Status, Target, TargetStatus, job_id,
 };
 use crate::relay::state::{Outgoing, Relay, Sub};
 use crate::relay::{agent_conn, login, ui};
@@ -46,34 +48,46 @@ pub async fn handle(relay: Arc<Relay>, peer: Vec<String>, req: Request<Incoming>
 
 /// Transport principals plus those from a bearer token or dashboard
 /// session. Empty is 401.
-pub async fn authenticate(
+pub async fn identify(
     relay: &Relay,
-    mut principals: Vec<String>,
+    peer: Vec<String>,
     req: &Request<Incoming>,
-) -> Result<Vec<String>, Resp> {
+) -> Result<Identity, Resp> {
+    let mut id = x509::identity(peer);
     let mut reason = String::from("no credentials");
     if let Some(s) = login::current(relay, req) {
-        principals.extend(s.principals);
+        id.merge(Identity {
+            principals: s.principals,
+            name: s.name,
+        });
     }
     if let Some(tok) = http::bearer(req) {
-        match relay.issuers.authenticate(tok).await {
-            Ok(p) => principals.extend(p),
+        match relay.issuers.identify(tok).await {
+            Ok(i) => id.merge(i),
             Err(e) => {
                 tracing::info!("bearer rejected: {e}");
                 reason = e;
             }
         }
     }
-    if principals.is_empty() {
+    if id.principals.is_empty() {
         return Err(http::error(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             reason,
         ));
     }
-    principals.sort();
-    principals.dedup();
-    Ok(principals)
+    id.principals.sort();
+    id.principals.dedup();
+    Ok(id)
+}
+
+pub async fn authenticate(
+    relay: &Relay,
+    peer: Vec<String>,
+    req: &Request<Incoming>,
+) -> Result<Vec<String>, Resp> {
+    identify(relay, peer, req).await.map(|i| i.principals)
 }
 
 async fn agents(relay: &Relay, peer: Vec<String>, req: &Request<Incoming>) -> Result<Resp, Resp> {
@@ -256,11 +270,11 @@ async fn deploy(
     peer: Vec<String>,
     req: Request<Incoming>,
 ) -> Result<Resp, Resp> {
-    let principals = authenticate(&relay, peer, &req).await?;
+    let id = identify(&relay, peer, &req).await?;
     let body = http::read_body(req.into_body(), 64 << 10).await?;
     let dr: DeployRequest = serde_json::from_slice(&body)
         .map_err(|e| http::error(StatusCode::BAD_REQUEST, "bad_request", e.to_string()))?;
-    let rx = start_deploy(relay, &principals, dr).map_err(|(s, e)| http::json(s, &e))?;
+    let rx = start_deploy(relay, &id, dr).map_err(|(s, e)| http::json(s, &e))?;
     Ok(sse_response(rx, sse::encode))
 }
 
@@ -269,15 +283,23 @@ async fn deploy(
 /// stop targets that already started.
 pub fn start_deploy(
     relay: Arc<Relay>,
-    principals: &[String],
+    id: &Identity,
     dr: DeployRequest,
 ) -> Result<mpsc::Receiver<Event>, (StatusCode, ApiError)> {
-    let waves = plan(&relay, principals, &dr)?;
-    let caller = principals.join("\n");
+    let waves = plan(&relay, &id.principals, &dr)?;
+    let caller = id.principals.join("\n");
     let job = job_id(&caller, &dr.id);
-    tracing::info!(job, caller = display_caller(&caller), targets = ?waves.iter().flatten().map(|p| &p.target).collect::<Vec<_>>(), "deploy accepted");
+    tracing::info!(job, caller = id.name, targets = ?waves.iter().flatten().map(|p| &p.target).collect::<Vec<_>>(), "deploy accepted");
     let (tx, rx) = mpsc::channel(64);
-    tokio::spawn(run_job(relay, job, caller, dr.id, waves, tx));
+    tokio::spawn(run_job(
+        relay,
+        job,
+        caller,
+        id.name.clone(),
+        dr.id,
+        waves,
+        tx,
+    ));
     Ok(rx)
 }
 
@@ -330,6 +352,7 @@ async fn run_job(
     relay: Arc<Relay>,
     job: String,
     caller: String,
+    caller_name: String,
     client_id: String,
     waves: Vec<Vec<Planned>>,
     tx: Out,
@@ -363,6 +386,7 @@ async fn run_job(
             flakelet: p.flakelet.clone(),
             rule: p.rule.clone(),
             caller: Some(caller.clone()),
+            caller_name: Some(caller_name.clone()),
             client_id: Some(client_id.clone()),
             options: BTreeMap::default(),
         })

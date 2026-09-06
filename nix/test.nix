@@ -164,6 +164,10 @@ let
           url = "https://relay:8443";
           audience = "flakelet-relay";
           principalClaims = [ "groups" ];
+          displayClaims = [
+            "repository"
+            "email"
+          ];
           login.clientId = "dashboard";
           login.clientSecretFile = "${pkgs.writeText "secret" "s3cret"}";
         };
@@ -302,8 +306,8 @@ in
   testScript = ''
     import json
 
-    def token(sub, groups=[]):
-        claims = json.dumps({"groups": groups})
+    def token(sub, groups=[], **extra):
+        claims = json.dumps({"groups": groups, **extra})
         return client.succeed(
             f"echo '{claims}' | step crypto jwt sign --key ${issuer}/jwk.json --iss https://relay:8443 "
             f"--aud flakelet-relay --sub '{sub}' --exp $(( $(date +%s) + 300 )) --jti $(head -c8 /dev/urandom | base32)"
@@ -484,17 +488,19 @@ in
         out = client.succeed(f"{admin} jobs")
         print(out)
         line = next(l for l in out.splitlines() if "\thist1\t" in l)
-        assert "x509:" in line and "agent/other:unchanged" in line, line
-        # A caller only sees jobs on targets its rules cover.
-        tok = token("repo:github:example/app:ref:refs/heads/main")
+        assert "\tadmin@example.org\t" in line and "agent/other:unchanged" in line, line
+        # A caller only sees jobs on targets its rules cover, and is
+        # named by the issuer's displayClaims rather than its principals.
+        tok = token("repo:github:example/app:ref:refs/heads/main", repository="example/app")
+        client.succeed(f"FLAKELET_RELAY_TOKEN_COMMAND='echo {tok}' push --relay https://relay:7443 deploy --id hist2 agent/app")
         out = client.succeed(f"FLAKELET_RELAY_TOKEN_COMMAND='echo {tok}' push --relay https://relay:7443 jobs")
-        assert "agent/app:" in out and "agent/other" not in out, out
+        assert "\texample/app\t" in out and "agent/other" not in out, out
 
     with subtest("dashboard login via authorization code flow"):
         curl = "curl -sS --cacert ${certs}/ca.pem -b /tmp/jar -c /tmp/jar"
         client.succeed(f"{curl} -o /dev/null -w '%{{http_code}} %{{redirect_url}}' https://relay:7443/ui/ | grep -q '303 https://relay:7443/ui/login'")
         page = client.succeed(f"{curl} -L https://relay:7443/ui/login")
-        assert "Signed in as" in page and ">someone<" in page, page
+        assert "Signed in as" in page and ">dev@example.org<" in page, page
         assert ">app<" in page and ">other<" in page and "healthy" in page, page
         jobs = client.succeed(f"{curl} https://relay:7443/ui/jobs")
         assert "hist1"[:8] in jobs and "agent/other" in jobs, jobs

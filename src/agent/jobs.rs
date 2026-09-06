@@ -31,6 +31,8 @@ struct Job {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     caller: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    caller_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     run: Option<Run>,
@@ -51,6 +53,7 @@ impl Job {
             flakelet: self.flakelet.clone(),
             state: self.state,
             caller: self.caller.clone(),
+            caller_name: self.caller_name.clone(),
             client_id: self.client_id.clone(),
             created: self.created,
             finished: self.finished,
@@ -305,6 +308,7 @@ impl Jobs {
         id: &str,
         flakelet: &str,
         caller: Option<String>,
+        caller_name: Option<String>,
         client_id: Option<String>,
     ) -> Vec<Frame> {
         let refuse = |reason: &str| {
@@ -331,6 +335,7 @@ impl Jobs {
                 state: JobState::Pending,
                 created: now(),
                 caller,
+                caller_name,
                 client_id,
                 ..Default::default()
             },

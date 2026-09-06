@@ -9,6 +9,7 @@ use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};
 use maud::{DOCTYPE, Markup, html};
 
+use crate::auth::issuers::Identity;
 use crate::http::{Body, Resp};
 use crate::proto::{self, DeployRequest, Event, JobState, Target, Wave};
 use crate::relay::api;
@@ -256,7 +257,11 @@ fn action(relay: Arc<Relay>, req: &Request<Incoming>, targets: Targets) -> Resp 
         waves: vec![Wave { targets }],
         options: BTreeMap::default(),
     };
-    match api::start_deploy(relay, &sess.principals, dr) {
+    let who = Identity {
+        principals: sess.principals.clone(),
+        name: sess.name.clone(),
+    };
+    match api::start_deploy(relay, &who, dr) {
         Ok(mut rx) => {
             // Keep consuming so later waves run. The job page attaches
             // through /ui/jobs/<id>/events.

@@ -63,6 +63,12 @@ rule matches if any principal matches.
 
 No principal means 401.
 
+Principals are only matched, never shown. For display each identity also
+carries a name: the first SAN value of a certificate, or the first
+present claim from the issuer's `displayClaims` (default
+`preferred_username`, `email`, falling back to `sub`). CI issuers set
+e.g. `displayClaims = [ "repository" ]`.
+
 Bearer tokens are valid for their whole lifetime, so keep CI tokens
 short-lived. The relay caches JWKS on disk and will use a stale copy
 for a while, so an issuer outage does not stop deploys. Agents without

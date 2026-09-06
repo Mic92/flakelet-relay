@@ -3,6 +3,19 @@
 use x509_parser::extensions::GeneralName;
 use x509_parser::prelude::FromDer as _;
 
+use crate::auth::issuers::Identity;
+
+/// Named after the first SAN.
+#[must_use]
+pub fn identity(principals: Vec<String>) -> Identity {
+    let name = principals
+        .first()
+        .and_then(|p| p.splitn(3, ':').nth(2))
+        .unwrap_or_default()
+        .to_owned();
+    Identity { principals, name }
+}
+
 /// One `x509:{dns,email,uri}:<value>` per SAN of the leaf certificate.
 #[must_use]
 pub fn principals(leaf_der: &[u8]) -> Vec<String> {

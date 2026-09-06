@@ -369,11 +369,11 @@ async fn job_list(ctx: &Ctx) -> Result<(), String> {
                 format!("{}:{s}", t.target)
             })
             .collect();
-        let caller = job.caller.lines().next().unwrap_or_default();
         println!(
-            "{}\t{}\t{caller}\t{}",
+            "{}\t{}\t{}\t{}",
             job.created,
             job.id,
+            job.caller_name,
             targets.join(" ")
         );
     }

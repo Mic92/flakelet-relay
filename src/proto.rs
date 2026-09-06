@@ -78,6 +78,8 @@ pub struct JobRef {
     pub state: JobState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caller: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_name: Option<String>,
     /// The id the caller chose, shared by all targets of one deploy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
@@ -137,6 +139,9 @@ pub enum Frame {
         /// relay can list the deploy later.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caller: Option<String>,
+        /// Display name for `caller`; principals are for policy only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_name: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_id: Option<String>,
         #[serde(default)]
@@ -308,6 +313,7 @@ pub struct JobTarget {
 pub struct JobSummary {
     pub id: String,
     pub caller: String,
+    pub caller_name: String,
     pub created: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished: Option<u64>,
@@ -330,15 +336,14 @@ pub fn job_id(caller: &str, client_id: &str) -> String {
     hex(&ctx.finish().as_ref()[..16])
 }
 
-/// One principal of a newline-joined caller for display and logs.
-/// OIDC `sub` is often an opaque UUID, so prefer an email principal.
-#[must_use]
-pub fn display_caller(caller: &str) -> &str {
-    let mut lines = caller.lines();
-    let first = lines.next().unwrap_or_default();
-    lines
-        .find_map(|l| l.split_once(":email:").map(|(_, v)| v))
-        .unwrap_or(first)
+impl JobRef {
+    /// `caller_name`, or the first principal for jobs from older relays.
+    #[must_use]
+    pub fn caller_name(&self) -> Option<&str> {
+        self.caller_name
+            .as_deref()
+            .or_else(|| self.caller.as_deref()?.lines().next())
+    }
 }
 
 #[must_use]
@@ -361,13 +366,6 @@ pub fn random_id() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn display_caller_prefers_email_over_opaque_sub() {
-        let c = "oidc:authelia:1967320f-21d8\noidc:authelia:email:joerg@thalheim.io\noidc:authelia:groups:admins";
-        assert_eq!(display_caller(c), "joerg@thalheim.io");
-        assert_eq!(display_caller("cn:ci\nsan:ci.example"), "cn:ci");
-    }
 
     #[test]
     fn unknown_frame_type_is_tolerated() {

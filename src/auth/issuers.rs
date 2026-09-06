@@ -19,6 +19,9 @@ pub struct IssuerConfig {
     pub audience: String,
     #[serde(default)]
     pub principal_claims: Vec<String>,
+    /// First present string claim names the caller in the UI and logs.
+    #[serde(default = "default_display_claims")]
+    pub display_claims: Vec<String>,
     /// OAuth client for browser login to the dashboard. Its id is
     /// accepted as a second audience.
     #[serde(default)]
@@ -33,11 +36,26 @@ pub struct Login {
     pub client_secret_file: Option<PathBuf>,
 }
 
-/// Who a verified token speaks for.
+fn default_display_claims() -> Vec<String> {
+    vec!["preferred_username".into(), "email".into()]
+}
+
+/// Who a request speaks for.
+#[derive(Debug, Clone, Default)]
 pub struct Identity {
     pub principals: Vec<String>,
-    /// `preferred_username`, `email` or `sub`, for display only.
+    /// For display only, never matched against policy.
     pub name: String,
+}
+
+impl Identity {
+    /// Union of both; the first non-empty name wins.
+    pub fn merge(&mut self, other: Identity) {
+        self.principals.extend(other.principals);
+        if self.name.is_empty() {
+            self.name = other.name;
+        }
+    }
 }
 
 const REFRESH: Duration = Duration::from_mins(10);
@@ -163,12 +181,8 @@ impl Issuers {
         &self.client
     }
 
-    /// Principals from the first issuer matching the token's `iss` that
+    /// Identity from the first issuer matching the token's `iss` that
     /// verifies it, else the reason.
-    pub async fn authenticate(&self, token: &str) -> Result<Vec<String>, String> {
-        self.identify(token).await.map(|i| i.principals)
-    }
-
     pub async fn identify(&self, token: &str) -> Result<Identity, String> {
         let iss = unverified_iss(token).ok_or("malformed token")?;
         let mut last = String::from("unknown issuer");
@@ -184,18 +198,15 @@ impl Issuers {
             auds.extend(cfg.login.as_ref().map(|l| l.client_id.as_str()));
             match jwt::verify(token, &jwks, &cfg.url, &auds, SystemTime::now()) {
                 Ok(claims) => {
-                    let name_of = |k: &str| {
-                        claims
-                            .extra
-                            .get(k)
-                            .and_then(|v| v.as_str())
-                            .map(str::to_owned)
-                    };
+                    let display = cfg
+                        .display_claims
+                        .iter()
+                        .find_map(|k| claims.extra.get(k.as_str())?.as_str())
+                        .unwrap_or(&claims.sub)
+                        .to_owned();
                     return Ok(Identity {
                         principals: jwt::principals(name, &claims, &cfg.principal_claims),
-                        name: name_of("preferred_username")
-                            .or_else(|| name_of("email"))
-                            .unwrap_or_else(|| claims.sub.clone()),
+                        name: display,
                     });
                 }
                 Err(jwt::Error::Issuer) => {}

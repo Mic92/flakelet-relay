@@ -242,6 +242,7 @@ impl Relay {
                 let s = by.entry((caller, cid)).or_insert_with(|| JobSummary {
                     id: cid.clone(),
                     caller: caller.clone(),
+                    caller_name: j.caller_name().unwrap_or_default().to_owned(),
                     created: j.created,
                     finished: j.finished,
                     targets: Vec::new(),
