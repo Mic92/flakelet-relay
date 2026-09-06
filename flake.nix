@@ -36,8 +36,8 @@
 
       formatter = forAllSystems (pkgs: (treefmtFor pkgs).config.build.wrapper);
 
-      flakelets.default = import ./nix/flakelet.nix;
-      flakelets.agent = import ./nix/flakelet-agent.nix;
+      flakelets.default = import ./nix/flakelet.nix crane;
+      flakelets.agent = import ./nix/flakelet-agent.nix crane;
 
       herculesCI = import ./nix/hercules-ci.nix {
         pkgs = nixpkgs.legacyPackages.x86_64-linux;
