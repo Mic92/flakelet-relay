@@ -89,13 +89,23 @@ fn last_state(j: Option<&JobRef>) -> (&'static str, &'static str) {
 }
 
 fn short_rev(r: &str) -> &str {
-    let tail = r.rsplit(['/', ':', '=']).next().unwrap_or(r);
+    let (path, query) = r.split_once('?').unwrap_or((r, ""));
+    let tail = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("rev="))
+        .or_else(|| path.rsplit(['/', ':']).next())
+        .unwrap_or(path);
     &tail[..tail.len().min(12)]
 }
 
-/// First principal only; the full caller goes in a title attribute.
+/// One principal for display; the full caller goes in a title attribute.
+/// OIDC `sub` is often an opaque UUID, so prefer an email principal.
 fn short(caller: &str) -> &str {
-    caller.lines().next().unwrap_or_default()
+    let mut lines = caller.lines();
+    let first = lines.next().unwrap_or_default();
+    lines
+        .find_map(|l| l.split_once(":email:").map(|(_, v)| v))
+        .unwrap_or(first)
 }
 
 /// Element id for a target; hex because host and flakelet names may
@@ -448,7 +458,26 @@ pub(crate) fn job(relay: &Relay, principals: &[String], id: &str) -> Markup {
 
 #[cfg(test)]
 mod tests {
-    use super::Filter;
+    use super::{Filter, short, short_rev};
+
+    #[test]
+    fn short_rev_uses_rev_not_nar_hash() {
+        assert_eq!(
+            short_rev(
+                "github:Mic92/tribuchet/71caf5d75be693a72299de34fd4a8f538f2deba4?narHash=sha256-1BkNm4b%3D"
+            ),
+            "71caf5d75be6"
+        );
+        assert_eq!(short_rev("git+https://x/y?ref=main&rev=abc"), "abc");
+        assert_eq!(short_rev("abc"), "abc");
+    }
+
+    #[test]
+    fn short_prefers_email_over_opaque_sub() {
+        let c = "oidc:authelia:1967320f-21d8\noidc:authelia:email:joerg@thalheim.io\noidc:authelia:groups:admins";
+        assert_eq!(short(c), "joerg@thalheim.io");
+        assert_eq!(short("cn:ci\nsan:ci.example"), "cn:ci");
+    }
 
     #[test]
     fn filter_terms_words_and_toggle() {

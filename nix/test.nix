@@ -366,6 +366,19 @@ in
         assert "rolled back" in out, out
         agent.succeed("systemctl show app.service -p Description | grep -q 'app v1'")
 
+    with subtest("host patterns expand on the relay"):
+        set_app("${appV1}")
+        # @all is only `agent`; `*` also covers the never-connected ghost.
+        out = client.succeed(f"{admin} deploy '@all/app' 2>&1")
+        assert "agent/app:" in out and "ghost" not in out, out
+        out = client.fail(f"{admin} deploy '*/app' 2>&1")
+        assert "agent/app:" in out and "offline: ghost/app" in out, out
+        # Earlier waves win: agent runs in wave 0, wave 1 only has ghost left.
+        out = client.fail(f"{admin} deploy agent/app --wave '*/app' 2>&1")
+        assert out.index("agent/app:") < out.index("wave 1") < out.index("offline: ghost/app"), out
+        out = client.fail(f"{admin} deploy '@all/nope' 2>&1")
+        assert "no_targets" in out, out
+
     with subtest("detach returns once the job is accepted"):
         set_app("${appSlow2}")
         out = client.succeed(f"timeout 20 {admin} deploy --detach agent/app 2>&1")

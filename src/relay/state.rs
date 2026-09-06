@@ -276,6 +276,36 @@ impl Relay {
         v
     }
 
+    /// Hosts for `pattern/flakelet` that `principals` may deploy:
+    /// connected agents advertising `flakelet`, and configured agents
+    /// that are not connected at all (a connected host without the
+    /// flakelet simply does not run it).
+    pub fn expand(
+        &self,
+        principals: &[String],
+        pattern: &str,
+        flakelet: &str,
+    ) -> (Vec<String>, Vec<String>) {
+        let policy = &self.cfg.policy;
+        let agents = self.agents.lock().expect("poisoned");
+        let (mut live, mut offline) = (Vec::new(), Vec::new());
+        for h in policy.agents.keys() {
+            if !policy.host_matches(pattern, h)
+                || policy.rule_for(principals, h, flakelet).is_none()
+            {
+                continue;
+            }
+            match agents.get(h) {
+                Some(a) if a.info.flakelets.iter().any(|n| n.name == flakelet) => {
+                    live.push(h.clone())
+                }
+                Some(_) => {}
+                None => offline.push(h.clone()),
+            }
+        }
+        (live, offline)
+    }
+
     pub fn has_flakelet(&self, host: &str, flakelet: &str) -> bool {
         self.agents
             .lock()

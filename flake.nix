@@ -40,6 +40,11 @@
 
       nixosModules.agent = import ./nix/module-agent.nix self;
 
+      herculesCI = import ./nix/hercules-ci.nix {
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+        inherit (self.packages.x86_64-linux) flakelet-push;
+      };
+
       checks = forAllSystems (
         pkgs:
         let
