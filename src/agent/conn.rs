@@ -180,11 +180,15 @@ impl Conn {
                 flakelet,
                 rule,
                 caller,
+                caller_name,
                 client_id,
                 options: _,
             }) => {
-                tracing::info!(id, flakelet, rule, relay, ?caller, "start");
-                for f in self.jobs.start(&id, &flakelet, caller, client_id) {
+                tracing::info!(id, flakelet, rule, relay, ?caller_name, "start");
+                for f in self
+                    .jobs
+                    .start(&id, &flakelet, caller, caller_name, client_id)
+                {
                     writer.frame(&f).await?;
                 }
             }

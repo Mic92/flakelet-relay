@@ -238,7 +238,7 @@ fn flakelet_row(g: &Group) -> Markup {
         td {
             @if let Some(j) = g.last {
                 (ago(j.created))
-                @if let Some(c) = &j.caller { span.dim title=(c) { " by " (proto::display_caller(c)) } }
+                @if let Some(c) = j.caller_name() { span.dim title=[j.caller.as_deref()] { " by " (c) } }
             } @else { span.faint { "–" } }
         }
         td { span class={"pill " (g.status)} { (g.status) } }
@@ -357,7 +357,7 @@ fn job_table(jobs: &[JobSummary]) -> Markup {
                 @for j in jobs {
                     tr {
                         td { (ago(j.created)) }
-                        td.trunc title=(j.caller) { (proto::display_caller(&j.caller)) }
+                        td.trunc title=(j.caller) { (j.caller_name) }
                         td.wrap { @for t in &j.targets { (pill(&t.target, t.state, t.status)) " " } }
                         td.mono { a href={"/ui/jobs/" (j.id)} { (j.id.get(..8).unwrap_or(&j.id)) } }
                     }
@@ -375,7 +375,9 @@ pub(crate) fn jobs(relay: &Relay, principals: &[String], f: &Filter) -> Markup {
             let targets: Vec<String> = j.targets.iter().map(|t| t.target.clone()).collect();
             f.matches(
                 |k| match k {
-                    "caller" => j.caller.lines().map(str::to_owned).collect(),
+                    "caller" => std::iter::once(j.caller_name.clone())
+                        .chain(j.caller.lines().map(str::to_owned))
+                        .collect(),
                     "target" => targets.clone(),
                     "host" => targets
                         .iter()
@@ -394,7 +396,13 @@ pub(crate) fn jobs(relay: &Relay, principals: &[String], f: &Filter) -> Markup {
                         .collect(),
                     _ => Vec::new(),
                 },
-                &format!("{} {} {}", j.id, j.caller, targets.join(" ")),
+                &format!(
+                    "{} {} {} {}",
+                    j.id,
+                    j.caller_name,
+                    j.caller,
+                    targets.join(" ")
+                ),
             )
         })
         .take(200)
@@ -430,7 +438,7 @@ pub(crate) fn job(relay: &Relay, principals: &[String], id: &str) -> Markup {
         .bar {
             h2 { "Deploy " span.mono { (id.get(..8).unwrap_or(id)) } }
             @if let Some(j) = &summary {
-                span.dim { (ago(j.created)) " by " span title=(j.caller) { (proto::display_caller(&j.caller)) } }
+                span.dim { (ago(j.created)) " by " span title=(j.caller) { (j.caller_name) } }
             }
             .sep {}
             (job_actions(id, ok))

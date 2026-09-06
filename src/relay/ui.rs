@@ -132,7 +132,7 @@ pub async fn handle(relay: Arc<Relay>, req: Request<Incoming>) -> Resp {
             let Some(sess) = login::current(&relay, &req) else {
                 return redirect("/ui/login");
             };
-            let p = &sess.principals;
+            let p = &sess.who.principals;
             let q = query(&req, "q").unwrap_or_default();
             let f = Filter::parse(&q);
             let mut status = StatusCode::OK;
@@ -195,7 +195,7 @@ fn layout(
                             }
                         }
                         form.me method="post" action="/ui/logout" {
-                            "Signed in as " b { (s.name) } " "
+                            "Signed in as " b { (s.who.name) } " "
                             button { "Log out" }
                         }
                     }
@@ -243,7 +243,7 @@ fn action(relay: Arc<Relay>, req: &Request<Incoming>, targets: Targets) -> Resp 
         return fail(StatusCode::FORBIDDEN, "not an htmx request");
     }
     let arg = query(req, "arg").unwrap_or_default();
-    let targets: Vec<Target> = targets(&relay, &sess.principals, &arg)
+    let targets: Vec<Target> = targets(&relay, &sess.who.principals, &arg)
         .into_iter()
         .map(|target| Target { target })
         .collect();
@@ -256,7 +256,7 @@ fn action(relay: Arc<Relay>, req: &Request<Incoming>, targets: Targets) -> Resp 
         waves: vec![Wave { targets }],
         options: BTreeMap::default(),
     };
-    match api::start_deploy(relay, &sess.principals, dr) {
+    match api::start_deploy(relay, &sess.who, dr) {
         Ok(mut rx) => {
             // Keep consuming so later waves run. The job page attaches
             // through /ui/jobs/<id>/events.
@@ -308,7 +308,7 @@ fn page_events(relay: Arc<Relay>, sess: Session, req: &Request<Incoming>) -> Res
             let chunk = if tick.is_ok() {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 changed = changed.resubscribe();
-                let p = &sess.principals;
+                let p = &sess.who.principals;
                 let seg: Vec<&str> = path.split('/').collect();
                 let body = match seg.as_slice() {
                     ["hosts"] => pages::hosts(&relay, p, &f),

@@ -22,10 +22,8 @@ const SESSION_AGE: Duration = Duration::from_hours(12);
 
 #[derive(Serialize, Deserialize)]
 pub struct Session {
-    #[serde(rename = "p")]
-    pub principals: Vec<String>,
-    #[serde(rename = "n")]
-    pub name: String,
+    #[serde(flatten)]
+    pub who: Identity,
     #[serde(rename = "e")]
     exp: u64,
 }
@@ -134,8 +132,7 @@ pub async fn callback(relay: &Relay, req: &Request<Incoming>) -> Resp {
     };
     tracing::info!(name = identity.name, principals = ?identity.principals, "login");
     let sess = Session {
-        principals: identity.principals,
-        name: identity.name,
+        who: identity,
         exp: now() + SESSION_AGE.as_secs(),
     };
     let r = with_cookie(redirect("/ui/"), &set_cookie(LOGIN, "", 0));
