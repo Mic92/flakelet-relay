@@ -1,7 +1,8 @@
-# Ask the relays to update themselves, authorized by this repo's nixbot
-# id token (rule "flakelet-relay" in Mic92/dotfiles
+# Roll out main: agents first (their restart does not interrupt the
+# update job, which runs in its own unit), then the relays. Authorized
+# by this repo's nixbot id token (rule "flakelet-relay" in Mic92/dotfiles
 # nixosModules/flakelet-relay). The relay serving the request restarts
-# as part of the deploy, so do not wait for the result.
+# as part of its own deploy, so that one is not waited for.
 { pkgs, flakelet-push }:
 let
   effects = import ./effects.nix { inherit pkgs; };
@@ -15,6 +16,7 @@ in
       inputs = [ flakelet-push ];
       effectScript = ''
         export FLAKELET_RELAY_TOKEN_COMMAND="nixbot-id-token flakelet-relay"
+        flakelet-push --relay-srv thalheim.io deploy '*/flakelet-agent'
         flakelet-push --relay-srv thalheim.io deploy --detach '@relays/flakelet-relay'
       '';
     }
