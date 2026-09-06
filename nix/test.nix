@@ -130,6 +130,24 @@ let
   appSlow2 = artifact "app" "slow2" { startPre = "${pkgs.coreutils}/bin/sleep 6"; };
   otherV1 = artifact "other" "v1" { };
 
+  agentArtifact = flakelet.lib.buildArtifact pkgs {
+    name = "flakelet-agent";
+    module = self.flakelets.agent;
+    settings = {
+      certFile = "${certs}/agent/cert.pem";
+      keyFile = "${certs}/agent/key.pem";
+      settings = {
+        relaySrv = "test";
+        caFile = "${certs}/ca.pem";
+        flakelets = [
+          "app"
+          "other"
+        ];
+        statusInterval = 2;
+      };
+    };
+  };
+
   relayArtifact = flakelet.lib.buildArtifact pkgs {
     name = "flakelet-relay";
     module = self.flakelets.default;
@@ -251,7 +269,6 @@ in
       networking.nameservers = [ containers.relay.networking.primaryIPAddress ];
       imports = [
         flakelet.nixosModules.default
-        self.nixosModules.agent
       ];
       environment.systemPackages = [
         pkgs.iproute2
@@ -261,6 +278,7 @@ in
         enable = true;
         services.app.prebuilt = appV1;
         services.other.prebuilt = otherV1;
+        services.flakelet-agent.prebuilt = agentArtifact;
       };
       # Referenced only from the test script.
       system.extraDependencies = [
@@ -269,18 +287,6 @@ in
         appSlow
         appSlow2
       ];
-      services.flakelet-agent = {
-        enable = true;
-        relaySrv = "test";
-        caFile = "${certs}/ca.pem";
-        certFile = "${certs}/agent/cert.pem";
-        keyFile = "${certs}/agent/key.pem";
-        flakelets = [
-          "app"
-          "other"
-        ];
-        statusInterval = 2;
-      };
     };
 
   containers.client =
